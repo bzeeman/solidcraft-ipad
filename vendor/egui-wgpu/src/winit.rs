@@ -27,6 +27,19 @@ struct SurfaceState {
     retry: crate::ConfigureRetry,
 }
 
+/// SolidCraft: the size in pixels of the surface a window is drawn on. On iOS winit's `inner_size`
+/// is the safe area only (the screen without the status bar and the home indicator), while the
+/// view the surface fills, and the screen egui-winit lays the UI out for
+/// (`screen_size_in_pixels`), is the `outer_size`. A surface of the inner size is stretched over
+/// the whole view and loses the bottom of the UI, and touches land below what they aim at.
+fn surface_size(window: &winit::window::Window) -> winit::dpi::PhysicalSize<u32> {
+    if cfg!(target_os = "ios") {
+        window.outer_size()
+    } else {
+        window.inner_size()
+    }
+}
+
 /// SolidCraft: whether a frame was presented yet (`crate::STEP_FIRST_PRESENT`).
 static FIRST_PRESENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -49,6 +62,10 @@ pub struct Painter {
     depth_texture_view: ViewportIdMap<wgpu::TextureView>,
     msaa_texture_view: ViewportIdMap<wgpu::TextureView>,
     surfaces: ViewportIdMap<SurfaceState>,
+    /// SolidCraft: each surface's window on iOS, where a resize is told the safe area's size
+    /// instead of the surface's (see `surface_size`).
+    #[cfg(target_os = "ios")]
+    windows: ViewportIdMap<Arc<winit::window::Window>>,
 }
 
 impl Painter {
@@ -86,6 +103,8 @@ impl Painter {
             depth_texture_view: Default::default(),
             surfaces: Default::default(),
             msaa_texture_view: Default::default(),
+            #[cfg(target_os = "ios")]
+            windows: Default::default(),
         }
     }
 
@@ -301,15 +320,19 @@ impl Painter {
         profiling::scope!("Painter::set_window"); // profile_function gives bad names for async functions
 
         if let Some(window) = window {
-            let size = window.inner_size();
+            let size = surface_size(&window); // SolidCraft
             if !self.surfaces.contains_key(&viewport_id) {
                 crate::startup_step(crate::STEP_SURFACE, ""); // SolidCraft
+                #[cfg(target_os = "ios")]
+                self.windows.insert(viewport_id, Arc::clone(&window)); // SolidCraft
                 let surface = self.instance.create_surface(window)?;
                 self.add_surface(surface, viewport_id, size).await?;
             }
         } else {
             log::warn!("No window - clearing all surfaces");
             self.surfaces.clear();
+            #[cfg(target_os = "ios")]
+            self.windows.clear(); // SolidCraft
         }
         Ok(())
     }
@@ -328,7 +351,7 @@ impl Painter {
         profiling::scope!("Painter::set_window_unsafe"); // profile_function gives bad names for async functions
 
         if let Some(window) = window {
-            let size = window.inner_size();
+            let size = surface_size(window); // SolidCraft
             if !self.surfaces.contains_key(&viewport_id) {
                 let surface = unsafe {
                     self.instance
@@ -610,6 +633,16 @@ impl Painter {
         height_in_pixels: NonZeroU32,
     ) {
         profiling::function_scope!();
+
+        // SolidCraft: on iOS the caller's size is the window's `inner_size`, the safe area; the
+        // surface takes the size of the whole view (see `surface_size`).
+        #[cfg(target_os = "ios")]
+        let (width_in_pixels, height_in_pixels) = self
+            .windows
+            .get(&viewport_id)
+            .map(|window| surface_size(window))
+            .and_then(|size| Some((NonZeroU32::new(size.width)?, NonZeroU32::new(size.height)?)))
+            .unwrap_or((width_in_pixels, height_in_pixels));
 
         if self.surfaces.contains_key(&viewport_id) {
             self.resize_and_generate_depth_texture_view_and_msaa_view(
@@ -1106,6 +1139,8 @@ impl Painter {
 
     pub fn gc_viewports(&mut self, active_viewports: &ViewportIdSet) {
         self.surfaces.retain(|id, _| active_viewports.contains(id));
+        #[cfg(target_os = "ios")]
+        self.windows.retain(|id, _| active_viewports.contains(id)); // SolidCraft
         self.depth_texture_view
             .retain(|id, _| active_viewports.contains(id));
         self.msaa_texture_view

@@ -78,6 +78,10 @@ SolidCraft changes:
   error scopes, awaiting every result before returning it. A refused UI pipeline (D3D12
   `egui_pipeline` shader compilation, #6648) returns `WgpuError::CreateRendererError` through
   eframe so startup can retry another backend instead of invoking wgpu's panic handler.
+- `src/winit.rs`: on iOS the surface takes the window's `outer_size` (`surface_size`), at
+  creation and on a resize. winit's `inner_size` is the safe area there, while egui-winit lays
+  the UI out for the outer size: a surface of the inner size was stretched over the whole view,
+  cut the bottom of the UI off and put touches below what they aimed at.
 
 ## winit 0.30.13 (Apache-2.0, © The winit contributors, https://github.com/rust-windowing/winit)
 
