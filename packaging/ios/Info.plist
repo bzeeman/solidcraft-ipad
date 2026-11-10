@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- The iPad app bundle's Info.plist (packaging/ios/bundle.sh fills @VERSION@, @MIN_OS@ and,
-     for the simulator or a real iPad, @PLATFORM@ and @PLATFORM_NAME@). iPad only; UILaunchScreen makes iPadOS give the app the whole screen instead of
-     a letterboxed compatibility size. -->
+<!-- The iPad app bundle's Info.plist (packaging/ios/bundle.sh fills @VERSION@, @BUILD@, @MIN_OS@
+     and, for the simulator or a real iPad, @PLATFORM@ and @PLATFORM_NAME@; on a Mac it also adds
+     the icon and the DT* keys that name the Xcode and SDK of the build, which Apple's upload
+     checks read). iPad only; UILaunchScreen makes iPadOS give the app the whole screen instead
+     of a letterboxed compatibility size. -->
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key>
@@ -22,17 +24,27 @@
   <key>CFBundleShortVersionString</key>
   <string>@VERSION@</string>
   <key>CFBundleVersion</key>
-  <string>1</string>
+  <string>@BUILD@</string>
   <key>CFBundleSupportedPlatforms</key>
   <array>
     <string>@PLATFORM@</string>
   </array>
   <key>DTPlatformName</key>
   <string>@PLATFORM_NAME@</string>
+  <!-- The app has no encryption in it: `cargo tree` of solidcraft-ios for aarch64-apple-ios
+       lists no TLS or cipher crate, only hashing. That is what this key states, and without it
+       TestFlight holds every build until the question is answered by hand. Look again when the
+       iPad app gains a dependency that encrypts. -->
+  <key>ITSAppUsesNonExemptEncryption</key>
+  <false/>
   <key>LSRequiresIPhoneOS</key>
   <true/>
   <key>MinimumOSVersion</key>
   <string>@MIN_OS@</string>
+  <key>UIRequiredDeviceCapabilities</key>
+  <array>
+    <string>arm64</string>
+  </array>
   <key>UIDeviceFamily</key>
   <array>
     <integer>2</integer>

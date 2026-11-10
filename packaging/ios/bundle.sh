@@ -14,7 +14,13 @@
 #   $DIST/SolidCraft-ios-device.zip  the same bundle, zipped
 #
 # Usage: packaging/ios/bundle.sh [--device] [--profile release|ci|debug] [--skip-build]
-#   DIST   where the bundle goes (default: dist/ios-sim, or dist/ios-device with --device)
+#   DIST          where the bundle goes (default: dist/ios-sim, or dist/ios-device with --device)
+#   BUILD_NUMBER  CFBundleVersion (default 1); Apple takes each number of a version once
+#
+# On a Mac the bundle also says which Xcode and SDK built it (the DT* keys of Info.plist) and
+# carries the app icon, compiled from the macOS master (assets/icons/app/macos/source), which is
+# drawn for both. Apple's upload checks want both, and the icon takes Xcode 26 or later: an older
+# Xcode leaves the bundle without one, with a warning.
 set -euo pipefail
 DEVICE=0
 for arg in "$@"; do
@@ -66,10 +72,43 @@ rm -rf "$APP" "$ZIP"
 mkdir -p "$APP"
 cp "$BIN" "$APP/solidcraft-ios"
 # CFBundleShortVersionString takes three numbers: a pre-release suffix is dropped.
-sed -e "s/@VERSION@/${VERSION%%-*}/" -e "s/@MIN_OS@/$IPHONEOS_DEPLOYMENT_TARGET/" \
-  -e "s/@PLATFORM@/$PLATFORM/" -e "s/@PLATFORM_NAME@/$(echo "$PLATFORM" | tr '[:upper:]' '[:lower:]')/" \
+SDK="$(echo "$PLATFORM" | tr '[:upper:]' '[:lower:]')"
+sed -e "s/@VERSION@/${VERSION%%-*}/" -e "s/@BUILD@/${BUILD_NUMBER:-1}/" -e "s/@MIN_OS@/$IPHONEOS_DEPLOYMENT_TARGET/" \
+  -e "s/@PLATFORM@/$PLATFORM/" -e "s/@PLATFORM_NAME@/$SDK/" \
   "$ROOT/packaging/ios/Info.plist" > "$APP/Info.plist"
 copy_docs "$APP"
+PLISTBUDDY=/usr/libexec/PlistBuddy
+if [ -x "$PLISTBUDDY" ] && command -v xcrun > /dev/null; then
+  sdk_version="$(xcrun --sdk "$SDK" --show-sdk-version)"
+  sdk_build="$(xcrun --sdk "$SDK" --show-sdk-build-version)"
+  xcode_version="$(xcodebuild -version | awk 'NR == 1 { print $2 }')"
+  xcode_build="$(xcodebuild -version | awk 'NR == 2 { print $3 }')"
+  # DTXcode is the version in four digits: 26.1 is 2610, 26.0.1 is 2601.
+  dt_xcode="$(echo "$xcode_version" | awk -F. '{ printf "%02d%d%d", $1, $2, $3 }')"
+  add() { "$PLISTBUDDY" -c "Add :$1 string $2" "$APP/Info.plist"; }
+  add BuildMachineOSBuild "$(sw_vers -buildVersion)"
+  add DTCompiler com.apple.compilers.llvm.clang.1_0
+  add DTPlatformBuild "$sdk_build"
+  add DTPlatformVersion "$sdk_version"
+  add DTSDKBuild "$sdk_build"
+  add DTSDKName "$SDK$sdk_version"
+  add DTXcode "$dt_xcode"
+  add DTXcodeBuild "$xcode_build"
+  echo "built with Xcode $xcode_version ($xcode_build), SDK $SDK$sdk_version ($sdk_build)"
+
+  # The icon: Assets.car, the loose images an older iPadOS reads, and the Info.plist keys that
+  # name them (actool writes those to a file of their own, merged in here).
+  icon_plist="$(mktemp -d)/icon.plist"
+  if xcrun actool "$ROOT/assets/icons/app/macos/source/SolidCraft.icon" --compile "$APP" \
+    --platform "$SDK" --minimum-deployment-target "$IPHONEOS_DEPLOYMENT_TARGET" --target-device ipad \
+    --app-icon SolidCraft --output-partial-info-plist "$icon_plist" --output-format human-readable-text; then
+    if [ -s "$icon_plist" ]; then "$PLISTBUDDY" -c "Merge $icon_plist" "$APP/Info.plist"; fi
+  else
+    warn "actool did not compile the app icon (it takes Xcode 26 or later; this is $xcode_version): the bundle has no icon"
+  fi
+else
+  warn "not on a Mac with Xcode: the bundle has no icon and does not say what built it"
+fi
 if [ "$DEVICE" = 1 ]; then
   echo "note: $APP is not signed; an iPad installs it only once it is"
 elif command -v codesign > /dev/null; then

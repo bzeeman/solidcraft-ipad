@@ -1,4 +1,4 @@
-# The iPad spike (apps/solidcraft-ios), on GitHub Macs. Two jobs:
+# The iPad spike (apps/solidcraft-ios), on GitHub Macs. Three jobs:
 #
 # - simulator: build SolidCraft for the iOS simulator, start it in an iPad simulator and keep
 #   pictures of its screen, its log and the app bundle. The bundle (SolidCraft-ios-sim) runs in
@@ -8,6 +8,11 @@
 #   can fetch them.
 # - device: build the same app for a real iPad (SolidCraft-ios-device). That bundle is NOT signed,
 #   and an iPad installs it only once it is.
+# - testflight: sign that bundle and upload it to TestFlight (packaging/ios/testflight.sh), which
+#   is how it reaches an iPad with no Mac of one's own. It takes an App Store Connect API key in
+#   the repository's secrets ASC_KEY_ID, ASC_ISSUER_ID and ASC_KEY_P8; without them it is a dry
+#   run that makes the same package and calls nobody. The key reaches only the steps that run
+#   that script, in a job with nothing else but GitHub's own actions, each pinned.
 #
 # Runs on pushes to the spike's branches only, and by hand.
 name: iPad spike
@@ -128,12 +133,25 @@ jobs:
         with:
           key: ios-device-${{ env.PROFILE }}
           cache-on-failure: true
+      - name: Use Xcode 26
+        # Apple takes uploads built with Xcode 26 or later. Not 27: UIKit starts an app built
+        # with that SDK only if it has a scene life cycle, and the window layer (winit 0.30) has
+        # none.
+        run: |
+          xcode="$(find /Applications -maxdepth 1 -name 'Xcode_26*.app' | grep -v -i -E 'beta|candidate' | sort -V | tail -1 || true)"
+          if [ -z "$xcode" ]; then
+            echo "::error::this runner has no Xcode 26: $(find /Applications -maxdepth 1 -name 'Xcode*' | tr '\n' ' ')"
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$xcode/Contents/Developer" xcodebuild -version
       - name: Build and bundle
         env:
           # As in the simulator job.
           RUSTC_WRAPPER: ${{ steps.sccache.outcome == 'success' && 'sccache' || '' }}
           SCCACHE_GHA_ENABLED: "true"
           SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+          BUILD_NUMBER: ${{ github.run_number }}
         run: |
           packaging/ios/bundle.sh --device --profile "$PROFILE"
           sccache --show-stats || true
@@ -142,3 +160,52 @@ jobs:
           name: SolidCraft-ios-device
           path: dist/ios-device/SolidCraft-ios-device.zip
           if-no-files-found: error
+
+  testflight:
+    name: Sign and upload to TestFlight (a dry run without the API key)
+    needs: device
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    # One at a time, whatever the branch: a run removes what another of its kind made at Apple.
+    concurrency:
+      group: ios-testflight
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Use Xcode 26
+        # Apple takes uploads built with Xcode 26 or later. Not 27: UIKit starts an app built
+        # with that SDK only if it has a scene life cycle, and the window layer (winit 0.30) has
+        # none.
+        run: |
+          xcode="$(find /Applications -maxdepth 1 -name 'Xcode_26*.app' | grep -v -i -E 'beta|candidate' | sort -V | tail -1 || true)"
+          if [ -z "$xcode" ]; then
+            echo "::error::this runner has no Xcode 26: $(find /Applications -maxdepth 1 -name 'Xcode*' | tr '\n' ' ')"
+            exit 1
+          fi
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+          DEVELOPER_DIR="$xcode/Contents/Developer" xcodebuild -version
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: SolidCraft-ios-device
+          path: dist/ios-device
+      - name: Sign, upload and wait for Apple
+        env:
+          # The key reaches the two steps that run the script, and nothing else in the job.
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+          # A number Apple has not seen for this version, also when only this job runs again.
+          BUILD_NUMBER: ${{ github.run_number }}.${{ github.run_attempt }}
+        run: |
+          ditto -x -k dist/ios-device/SolidCraft-ios-device.zip dist/ios-device
+          packaging/ios/testflight.sh
+      - name: Leave nothing of an interrupted run at Apple
+        # The script does this itself when it ends; this is for when it was cut off.
+        if: ${{ failure() || cancelled() }}
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: packaging/ios/testflight.sh --cleanup
