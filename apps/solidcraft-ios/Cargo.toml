@@ -1,0 +1,31 @@
+[package]
+name = "solidcraft-ios"
+description = "SolidCraft on iPadOS (a spike): the shared app in eframe's native runner, on UIKit and Metal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "solidcraft-ios"
+path = "src/main.rs"
+
+[features]
+default = ["bundled-render-library", "profile"]
+bundled-render-library = ["solidcraft-engine/bundled-render-library"]
+# The profiler, compiled in as in the other apps; it records nothing until asked.
+profile = ["solidcraft-engine/profile"]
+
+[dependencies]
+solidcraft-engine = { workspace = true }
+solidcraft-ui-egui = { workspace = true }
+egui = { workspace = true }
+log = { workspace = true }
+
+# Only an iOS target builds the app; elsewhere the binary says so (as solidcraft-web does off wasm),
+# so the workspace still builds everywhere.
+[target.'cfg(target_os = "ios")'.dependencies]
+eframe = { workspace = true, features = ["default_fonts", "wgpu"] }

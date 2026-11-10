@@ -1,0 +1,59 @@
+# The iPad spike (apps/solidcraft-ios): build SolidCraft for the iOS simulator on a GitHub Mac,
+# start it in an iPad simulator and keep pictures of its screen, its log and the app bundle.
+#
+# Runs on pushes to the spike's branch only, and by hand. The bundle (SolidCraft-ios-sim) runs in
+# the Simulator of any Apple silicon Mac with Xcode: unzip it and drag SolidCraft.app onto a
+# running iPad simulator, or `xcrun simctl install booted SolidCraft.app`.
+name: iPad simulator
+
+on:
+  push:
+    branches: [ios-sim-spike]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-sim-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  simulator:
+    name: Build and launch in an iPad simulator
+    runs-on: macos-15
+    timeout-minutes: 120
+    env:
+      # Quick to build, quick enough to run (the profile the tests use).
+      PROFILE: ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: ios-sim-${{ env.PROFILE }}
+          # A spike iterates on a broken build: keep what compiled.
+          cache-on-failure: true
+      - name: Xcode and simulators
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available | grep -i ipad || true
+      - name: Build and bundle
+        run: packaging/ios/bundle-sim.sh --profile "$PROFILE"
+      - name: Launch in an iPad simulator
+        id: launch
+        run: packaging/ios/run-sim.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: ios-sim-run
+          path: dist/ios-sim/run/
+          if-no-files-found: warn
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: SolidCraft-ios-sim
+          path: dist/ios-sim/SolidCraft-ios-sim.zip
+          if-no-files-found: warn

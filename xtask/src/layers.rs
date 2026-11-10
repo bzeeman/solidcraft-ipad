@@ -64,6 +64,8 @@ pub const TABLE: &[(&str, Class)] = &[
     ("solidcraft", Class::Exempt),
     ("cli", Class::Exempt),
     ("web", Class::Exempt),
+    // the iPadOS spike (the shared app in eframe's native runner on UIKit)
+    ("ios", Class::Exempt),
     ("xtask", Class::Exempt),
 ];
 

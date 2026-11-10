@@ -4244,6 +4244,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "solidcraft-ios"
+version = "0.40.0-rc.3"
+dependencies = [
+ "eframe",
+ "egui",
+ "log",
+ "solidcraft-engine",
+ "solidcraft-ui-egui",
+]
+
+[[package]]
 name = "solidcraft-kernel"
 version = "0.40.0-rc.3"
 dependencies = [
