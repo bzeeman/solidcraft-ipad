@@ -219,8 +219,12 @@ if [ "$SIGNED" = 0 ]; then
   codesign --force --sign - "$APP"
   codesign --verify --strict --verbose=2 "$APP"
   package
-  echo "altool here: $(xcrun altool --version 2>&1 | sed -n 1p)"
-  xcrun altool --help 2>&1 | grep -E -- '--(upload|validate)-(app|package)' | sed 's/^/  /' || true
+  # altool's verbs and options have changed between Xcodes: keep what this one takes in the log,
+  # next to the call further down that a dry run cannot make.
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::group::altool of this Xcode"; fi
+  xcrun altool --version 2>&1 || true
+  xcrun altool --help 2>&1 || true
+  if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::endgroup::"; fi
   if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo "TestFlight: dry run only. $VERSION_SHORT ($BUILD) packaged; the API key is not in this repository's secrets." >> "$GITHUB_STEP_SUMMARY"
   fi
@@ -312,14 +316,19 @@ codesign --verify --strict --verbose=2 "$APP"
 package
 
 export API_PRIVATE_KEYS_DIR="$WORK/private_keys"
+# altool as of Xcode 26 (its usage, read from Xcode 26.3 on a GitHub Mac): the file follows the
+# verb, and the app is named by its Apple ID (the id of its record in the API), its identifier
+# and both version numbers. It finds the key file by the key's id in API_PRIVATE_KEYS_DIR.
 upload() {
   local status=0
-  xcrun altool "$1" -f "$IPA" -t ios --apiKey "$ASC_KEY_ID" --apiIssuer "$ASC_ISSUER_ID" 2>&1 | tee "$WORK/altool.log" || status=$?
+  xcrun altool "$1" "$IPA" --platform ios --apple-id "$APP_ID" --bundle-id "$BUNDLE_ID" \
+    --bundle-version "$BUILD" --bundle-short-version-string "$VERSION_SHORT" \
+    --api-key "$ASC_KEY_ID" --api-issuer "$ASC_ISSUER_ID" 2>&1 | tee "$WORK/altool.log" || status=$?
   # altool has answered an error with a zero status before.
   if [ "$status" != 0 ] || grep -q -E 'ERROR|Failed to' "$WORK/altool.log"; then return 1; fi
 }
 upload --validate-app || die "Apple's validation refused the package (its reasons are above)"
-upload --upload-app || die "the upload failed (the reasons are above)"
+upload --upload-package || die "the upload failed (the reasons are above)"
 echo "uploaded: $VERSION_SHORT ($BUILD)"
 
 # --- Wait for Apple's processing, then take the certificate back ------------------------------
