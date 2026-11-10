@@ -64,6 +64,9 @@ mod ios {
         pencil: pencil::Pencil,
         /// See [`DEMO`]: the frames its input has been given for, while it runs.
         demo: Option<u32>,
+        /// The Pencil asked to be looked at again after this many seconds (a squeeze that may
+        /// become a hold); asked of egui in `logic`.
+        wake: Option<f64>,
     }
 
     impl Shell {
@@ -84,7 +87,6 @@ mod ios {
                     modifiers: egui::Modifiers::NONE,
                 });
             }
-            ctx.request_repaint();
         }
 
         /// The ring of keys while it is open, the held modifiers beside the tip, and the readout.
@@ -151,6 +153,15 @@ mod ios {
                 ctx.request_repaint();
                 log::info!(target: "solidcraft_ios", "frame {} begins", self.frames);
             }
+            // What `raw_input_hook` found it needs is asked for here, inside the pass. Asked from
+            // the hook, a wait is weighed against the previous pass's request and dropped when
+            // that one was "at once": the held squeeze then never opened its ring.
+            if let Some(wake) = self.wake.take() {
+                ctx.request_repaint_after(std::time::Duration::try_from_secs_f64(wake).unwrap_or_default());
+            }
+            if self.demo.is_some() || !self.app.synthetic.is_empty() {
+                ctx.request_repaint();
+            }
             self.app.logic(ctx);
         }
 
@@ -158,16 +169,16 @@ mod ios {
             self.demo_input(ctx, raw);
             // The Pencil's gestures come out of the input before the app reads it, and what they
             // ask for goes in the way an agent's clicks and keys do.
+            let ring = self.pencil.ring().is_some();
             let heard = self.pencil.frame(raw, ctx.content_rect(), !self.app.synthetic.is_empty());
             for action in heard.actions {
+                log::info!(target: "solidcraft_ios", "pencil: {action:?}");
                 self.app.synthetic.extend(action.events());
             }
-            if let Some(wake) = heard.wake {
-                ctx.request_repaint_after(std::time::Duration::try_from_secs_f64(wake).unwrap_or_default());
+            if self.pencil.ring().is_some() != ring {
+                log::info!(target: "solidcraft_ios", "pencil: the ring of keys is {}", if ring { "closed" } else { "open" });
             }
-            if !self.app.synthetic.is_empty() {
-                ctx.request_repaint();
-            }
+            self.wake = heard.wake;
             self.app.raw_input_hook(raw);
         }
 
@@ -255,7 +266,7 @@ mod ios {
                 app.fit_view();
                 log::info!(target: "solidcraft_ios", "app created");
                 let demo = std::env::var(DEMO).is_ok_and(|demo| demo == "ring").then_some(0);
-                Ok(Box::new(Shell { app, frames: 0, pencil: pencil::Pencil::default(), demo }))
+                Ok(Box::new(Shell { app, frames: 0, pencil: pencil::Pencil::default(), demo, wake: None }))
             }),
         );
         if let Err(e) = result {
