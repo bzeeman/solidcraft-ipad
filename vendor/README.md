@@ -108,6 +108,21 @@ SolidCraft changes:
 - `src/platform_impl/linux/wayland/seat/mod.rs`, `state.rs`, `seat/pointer/mod.rs`: the
   global bound with the connection, the gesture object of each seat's pointer, and the
   module wiring.
+- `src/platform_impl/ios/view.rs`, `Cargo.toml` (the iPad spike, `apps/solidcraft-ios`): the
+  view always carries a `UIHoverGestureRecognizer` and a `UIPencilInteraction`. A hovering
+  Apple Pencil (or a trackpad's pointer) is reported as `CursorMoved` and `CursorLeft`; the
+  iOS backend reported contact only, so the app saw no pointer until the tip touched. A hover
+  that ends while a touch is down is not reported as the pointer leaving (`touches_down`).
+  The Pencil's own gestures are no touches and winit 0.30 has no event for them, so they are
+  reported as keys no iPad keyboard sends through this view: F13 pressed and released for a
+  double tap on the Pencil's side, F14 held for as long as a squeeze lasts (after a
+  `CursorMoved` to the squeeze's own hover position, when it has one), F15 pressed and
+  released when the system takes a squeeze back. `apps/solidcraft-ios/src/pencil.rs` takes
+  those keys out of the input and decides what they do. A stand-in for the spike: a real port
+  would add events for them upstream. Squeeze and its hover position need iPadOS 17.5; the
+  delegate's two methods are declared with the view's own methods, not in the protocol's
+  block, where a build with debug assertions refuses a method the running system's protocol
+  does not have. Not run on a device yet.
 - `Cargo.toml`: enable the `unstable` feature of `wayland-protocols` on the Linux dependency
   (the `wp::pointer_gestures` module); drop the example and test targets.
 - `src/event.rs`, `src/changelog/unreleased.md`: the platform notes of both events and the

@@ -379,6 +379,10 @@ features = [
     "UIEvent",
     "UIGeometry",
     "UIGestureRecognizer",
+    # SolidCraft: a hovering Apple Pencil and its own gestures (double tap, squeeze).
+    "UIHoverGestureRecognizer",
+    "UIInteraction",
+    "UIPencilInteraction",
     "UITextInput",
     "UITextInputTraits",
     "UIOrientation",

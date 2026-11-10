@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- The simulator app bundle's Info.plist (packaging/ios/bundle-sim.sh fills @VERSION@ and
-     @MIN_OS@). iPad only; UILaunchScreen makes iPadOS give the app the whole screen instead of
+<!-- The iPad app bundle's Info.plist (packaging/ios/bundle.sh fills @VERSION@, @MIN_OS@ and,
+     for the simulator or a real iPad, @PLATFORM@ and @PLATFORM_NAME@). iPad only; UILaunchScreen makes iPadOS give the app the whole screen instead of
      a letterboxed compatibility size. -->
 <plist version="1.0">
 <dict>
@@ -25,10 +25,10 @@
   <string>1</string>
   <key>CFBundleSupportedPlatforms</key>
   <array>
-    <string>iPhoneSimulator</string>
+    <string>@PLATFORM@</string>
   </array>
   <key>DTPlatformName</key>
-  <string>iphonesimulator</string>
+  <string>@PLATFORM_NAME@</string>
   <key>LSRequiresIPhoneOS</key>
   <true/>
   <key>MinimumOSVersion</key>

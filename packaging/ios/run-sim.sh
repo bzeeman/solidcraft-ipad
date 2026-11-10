@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install SolidCraft.app (packaging/ios/bundle-sim.sh) in an iPad simulator, launch it and take
+# Install SolidCraft.app (packaging/ios/bundle.sh) in an iPad simulator, launch it and take
 # pictures of the screen:
 #
 #   $OUT/shot-<seconds>.png     the simulator's screen that long after launch
@@ -10,6 +10,10 @@
 # Usage: packaging/ios/run-sim.sh [SolidCraft.app]
 #   SIM_DEVICE   the simulator to use (default: the newest iPad Pro 13-inch, else any iPad)
 #   SIM_SHOTS    seconds after launch at which to take a picture (default: "5 20 45")
+#   SIMCTL_CHILD_<NAME>   reaches the app as <NAME> in its environment, for example
+#                SIMCTL_CHILD_SOLIDCRAFT_IOS_PENCIL_DEMO=ring: the app squeezes an Apple Pencil for
+#                itself and holds on, so the pictures show the ring of keys (the simulator has
+#                no Pencil)
 #
 # Needs Xcode with an iOS simulator runtime. Exits non-zero when the app is no longer running
 # after the last picture.
@@ -21,7 +25,7 @@ BUNDLE_ID=io.github.bzeeman.solidcraft-ipad
 SHOTS="${SIM_SHOTS:-5 20 45}"
 
 if [ ! -d "$APP" ]; then
-  echo "error: $APP is missing (run packaging/ios/bundle-sim.sh first)" >&2
+  echo "error: $APP is missing (run packaging/ios/bundle.sh first)" >&2
   exit 1
 fi
 mkdir -p "$OUT"

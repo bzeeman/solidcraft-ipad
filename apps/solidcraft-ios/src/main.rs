@@ -2,18 +2,29 @@
 //!
 //! Runs the same [`solidcraft_ui_egui::SolveApp`] as the desktop and browser apps through eframe's
 //! native runner, which on iOS is winit's UIKit backend drawing with wgpu on Metal. It opens the
-//! sample part and nothing more: no file dialogs, no settings kept between runs, no touch or
-//! Apple Pencil handling beyond what egui does with a touch (a tap is a click, two fingers zoom).
+//! sample part and nothing more: no file dialogs, no settings kept between runs, no touch
+//! handling beyond what egui does with a touch (a tap is a click, two fingers zoom).
+//!
+//! The Apple Pencil's own gestures are tried out here ([`pencil`]): a double tap on its side is
+//! Escape, a squeeze clicks where the tip hovered, and a held squeeze opens a ring of the keys a
+//! keyboard would give. A readout in the corner says what the Pencil was heard doing.
 //!
 //! Build for the simulator on Apple silicon with
 //! `cargo build -p solidcraft-ios --target aarch64-apple-ios-sim`, then wrap the binary in an app
-//! bundle with `packaging/ios/bundle-sim.sh` (the simulator needs no code signature).
+//! bundle with `packaging/ios/bundle.sh` (the simulator needs no code signature). For a real iPad
+//! the target is `aarch64-apple-ios` (`bundle.sh --device`), and the bundle must then be signed.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+
+#[cfg(any(target_os = "ios", test))]
+mod pencil;
 
 #[cfg(target_os = "ios")]
 mod ios {
     use solidcraft_engine::Session;
+    use solidcraft_ui_egui::ui_kit::{Container, Surface};
     use solidcraft_ui_egui::{Services, SolveApp};
+
+    use crate::pencil;
 
     /// The scene's depth and stencil, as in the desktop app.
     const DEPTH_BITS: u8 = 24;
@@ -41,9 +52,95 @@ mod ios {
         fn flush(&self) {}
     }
 
+    /// With this in the environment set to `ring`, the app squeezes for itself a moment after it
+    /// starts and holds on, so a picture of the simulator (which has no Pencil) shows the ring.
+    const DEMO: &str = "SOLIDCRAFT_IOS_PENCIL_DEMO";
+    /// The frame the demo's squeeze begins on: the sample is on screen by then.
+    const DEMO_FRAME: u32 = 30;
+
     struct Shell {
         app: SolveApp,
         frames: u32,
+        pencil: pencil::Pencil,
+        /// See [`DEMO`]: the frames its input has been given for, while it runs.
+        demo: Option<u32>,
+    }
+
+    impl Shell {
+        /// See [`DEMO`]: the tip hovers mid-screen, then a squeeze that is never let go.
+        fn demo_input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+            let Some(frames) = self.demo else {
+                return;
+            };
+            self.demo = (frames < DEMO_FRAME).then_some(frames + 1);
+            let at = ctx.content_rect().center();
+            raw.events.push(egui::Event::PointerMoved(at));
+            if self.demo.is_none() {
+                raw.events.push(egui::Event::Key {
+                    key: egui::Key::F14,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            ctx.request_repaint();
+        }
+
+        /// The ring of keys while it is open, the held modifiers beside the tip, and the readout.
+        fn pencil_ui(&mut self, ctx: &egui::Context) {
+            let tokens = solidcraft_ui_egui::theme::Tokens::get();
+            if let Some(centre) = self.pencil.ring() {
+                let bounds = pencil::ring_bounds(centre);
+                let held = self.pencil.held();
+                let mut pressed = None;
+                Container::new(ctx, Surface::Popup).area(egui::Id::unique("pencil-ring")).order(egui::Order::Foreground).fixed_pos(bounds.min).show(
+                    ctx,
+                    |ui| {
+                        // The whole square is the ring's, its dead centre included: a tap between the
+                        // keys reaches nothing under it.
+                        ui.allocate_rect(bounds, egui::Sense::click());
+                        ui.painter().circle(
+                            centre,
+                            bounds.width() / 2.0,
+                            tokens.dialog_body.gamma_multiply(0.9),
+                            tokens.primary_border(tokens.dialog_border),
+                        );
+                        for (index, item) in pencil::ITEMS.iter().enumerate() {
+                            let on = item.holds().is_some_and(|modifier| held.contains(modifier));
+                            if ui.put(pencil::key_rect(centre, index), egui::Button::new(item.label()).selected(on)).clicked() {
+                                pressed = Some(*item);
+                            }
+                        }
+                    },
+                );
+                if let Some(item) = pressed
+                    && let Some(action) = self.pencil.press(item)
+                {
+                    self.app.synthetic.extend(action.events());
+                    ctx.request_repaint();
+                }
+            }
+
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("pencil-readout")));
+            let font = egui::FontId::proportional(13.0);
+            let held = pencil::held_label(self.pencil.held());
+            if !held.is_empty()
+                && let Some(tip) = self.pencil.tip()
+            {
+                painter.text(tip + egui::vec2(14.0, -14.0), egui::Align2::LEFT_BOTTOM, held, font.clone(), tokens.accent);
+            }
+            // Bottom left, over the model and clear of the timeline.
+            let content = ctx.content_rect();
+            let mut at = egui::pos2(content.left() + 16.0, content.bottom() - 88.0);
+            for line in self.pencil.readout().iter().rev() {
+                let galley = painter.layout_no_wrap(line.clone(), font.clone(), tokens.text);
+                let rect = egui::Rect::from_min_size(egui::pos2(at.x, at.y - galley.size().y), galley.size());
+                painter.rect_filled(rect.expand2(egui::vec2(6.0, 2.0)), 4.0, tokens.dialog_body.gamma_multiply(0.8));
+                painter.galley(rect.min, galley, tokens.text);
+                at.y = rect.top() - 4.0;
+            }
+        }
     }
 
     impl eframe::App for Shell {
@@ -57,7 +154,20 @@ mod ios {
             self.app.logic(ctx);
         }
 
-        fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+            self.demo_input(ctx, raw);
+            // The Pencil's gestures come out of the input before the app reads it, and what they
+            // ask for goes in the way an agent's clicks and keys do.
+            let heard = self.pencil.frame(raw, ctx.content_rect(), !self.app.synthetic.is_empty());
+            for action in heard.actions {
+                self.app.synthetic.extend(action.events());
+            }
+            if let Some(wake) = heard.wake {
+                ctx.request_repaint_after(std::time::Duration::try_from_secs_f64(wake).unwrap_or_default());
+            }
+            if !self.app.synthetic.is_empty() {
+                ctx.request_repaint();
+            }
             self.app.raw_input_hook(raw);
         }
 
@@ -68,6 +178,7 @@ mod ios {
             let above = egui::Rect::from_min_max(ui.max_rect().min, egui::pos2(ui.max_rect().right(), content.top()));
             ui.painter().rect_filled(above, 0.0, solidcraft_ui_egui::theme::Tokens::get().app_bar);
             ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| self.app.ui(ui));
+            self.pencil_ui(ui.ctx());
         }
     }
 
@@ -143,7 +254,8 @@ mod ios {
                 app.cam.set_view(solidcraft_engine::render::StandardView::Iso);
                 app.fit_view();
                 log::info!(target: "solidcraft_ios", "app created");
-                Ok(Box::new(Shell { app, frames: 0 }))
+                let demo = std::env::var(DEMO).is_ok_and(|demo| demo == "ring").then_some(0);
+                Ok(Box::new(Shell { app, frames: 0, pencil: pencil::Pencil::default(), demo }))
             }),
         );
         if let Err(e) = result {

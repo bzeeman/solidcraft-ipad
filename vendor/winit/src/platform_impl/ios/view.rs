@@ -2,12 +2,14 @@
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
-use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2::runtime::{AnyClass, NSObjectProtocol, ProtocolObject};
 use objc2::{declare_class, msg_send, msg_send_id, mutability, sel, ClassType, DeclaredClass};
 use objc2_foundation::{CGFloat, CGPoint, CGRect, MainThreadMarker, NSObject, NSSet, NSString};
 use objc2_ui_kit::{
     UICoordinateSpace, UIEvent, UIForceTouchCapability, UIGestureRecognizer,
-    UIGestureRecognizerDelegate, UIGestureRecognizerState, UIKeyInput, UIPanGestureRecognizer,
+    UIGestureRecognizerDelegate, UIGestureRecognizerState, UIHoverGestureRecognizer, UIKeyInput,
+    UIPanGestureRecognizer, UIPencilInteraction, UIPencilInteractionDelegate,
+    UIPencilInteractionPhase, UIPencilInteractionSqueeze, UIPencilInteractionTap,
     UIPinchGestureRecognizer, UIResponder, UIRotationGestureRecognizer, UITapGestureRecognizer,
     UITextInputTraits, UITouch, UITouchPhase, UITouchType, UITraitEnvironment, UIView,
 };
@@ -31,6 +33,10 @@ pub struct WinitViewState {
     rotation_last_delta: Cell<CGFloat>,
     pinch_last_delta: Cell<CGFloat>,
     pan_last_delta: Cell<CGPoint>,
+
+    // SolidCraft: the touches in contact with the screen. A hover ends when the Pencil's tip
+    // lands, and that is not the pointer leaving.
+    touches_down: Cell<usize>,
 }
 
 declare_class!(
@@ -317,6 +323,32 @@ declare_class!(
             app_state::handle_nonuser_event(mtm, gesture_event);
         }
 
+        // SolidCraft: a hovering Apple Pencil (or a trackpad's pointer) moves the cursor.
+        #[method(hoverGesture:)]
+        fn hover_gesture(&self, recognizer: &UIHoverGestureRecognizer) {
+            self.handle_hover(recognizer)
+        }
+
+        // SolidCraft: the Apple Pencil's own gestures, which are no touches: a double tap on its
+        // side and (Apple Pencil Pro) a squeeze. winit has no event for either, so they are
+        // reported as function keys that no iPad keyboard sends through this view (see
+        // `pencil_key`): F13 pressed and released is a double tap, F14 is down for as long as the
+        // squeeze lasts, and F15 pressed and released says the system took the squeeze back.
+        //
+        // These are `UIPencilInteractionDelegate`'s methods (iPadOS 17.5). They are declared
+        // here and not in the protocol's block below, where a build with debug assertions
+        // refuses a method the running system's protocol does not have yet.
+        #[method(pencilInteraction:didReceiveTap:)]
+        fn pencil_did_receive_tap(&self, _interaction: &UIPencilInteraction, _tap: &UIPencilInteractionTap) {
+            self.pencil_key(NamedKey::F13, KeyCode::F13, ElementState::Pressed);
+            self.pencil_key(NamedKey::F13, KeyCode::F13, ElementState::Released);
+        }
+
+        #[method(pencilInteraction:didReceiveSqueeze:)]
+        fn pencil_did_receive_squeeze(&self, _interaction: &UIPencilInteraction, squeeze: &UIPencilInteractionSqueeze) {
+            self.handle_pencil_squeeze(squeeze)
+        }
+
         #[method(canBecomeFirstResponder)]
         fn can_become_first_responder(&self) -> bool {
             true
@@ -331,6 +363,10 @@ declare_class!(
             true
         }
     }
+
+    // SolidCraft: the delegate of the view's `UIPencilInteraction`. Its two methods are declared
+    // with the view's own above (see `pencil_did_receive_tap`).
+    unsafe impl UIPencilInteractionDelegate for WinitView {}
 
     unsafe impl UITextInputTraits for WinitView {
     }
@@ -368,10 +404,14 @@ impl WinitView {
             rotation_last_delta: Cell::new(0.0),
             pinch_last_delta: Cell::new(0.0),
             pan_last_delta: Cell::new(CGPoint { x: 0.0, y: 0.0 }),
+
+            touches_down: Cell::new(0),
         });
         let this: Retained<Self> = unsafe { msg_send_id![super(this), initWithFrame: frame] };
 
         this.setMultipleTouchEnabled(true);
+        // SolidCraft: always on, unlike the finger gestures above.
+        this.recognize_pencil();
 
         if let Some(scale_factor) = window_attributes.platform_specific.scale_factor {
             this.setContentScaleFactor(scale_factor as _);
@@ -474,6 +514,124 @@ impl WinitView {
         }
     }
 
+    /// SolidCraft: report a hovering Apple Pencil (or a trackpad's pointer) as the cursor, and the
+    /// Pencil's double tap and squeeze as keys (see `pencil_did_receive_tap`).
+    fn recognize_pencil(&self) {
+        let mtm = MainThreadMarker::from(self);
+        let hover = unsafe {
+            UIHoverGestureRecognizer::initWithTarget_action(
+                mtm.alloc(),
+                Some(self),
+                Some(sel!(hoverGesture:)),
+            )
+        };
+        hover.setDelegate(Some(ProtocolObject::from_ref(self)));
+        self.addGestureRecognizer(&hover);
+
+        // The class is there from iPadOS 12.1, the squeeze from 17.5.
+        if AnyClass::get("UIPencilInteraction").is_some() {
+            let pencil = unsafe { UIPencilInteraction::new(mtm) };
+            unsafe { pencil.setDelegate(Some(ProtocolObject::from_ref(self))) };
+            unsafe { self.addInteraction(ProtocolObject::from_ref(&*pencil)) };
+        }
+    }
+
+    /// SolidCraft: where a point of this view is in the window's pixels, as a touch's is.
+    fn physical_position(&self, logical: CGPoint) -> PhysicalPosition<f64> {
+        let scale_factor = self.contentScaleFactor();
+        PhysicalPosition::from_logical::<(f64, f64), f64>(
+            (logical.x as _, logical.y as _),
+            scale_factor as f64,
+        )
+    }
+
+    /// SolidCraft: see `hover_gesture`.
+    fn handle_hover(&self, recognizer: &UIHoverGestureRecognizer) {
+        // In contact the Pencil is a touch, and the hover that ends as its tip lands must not
+        // take the pointer away from that touch.
+        if self.ivars().touches_down.get() > 0 {
+            return;
+        }
+        let Some(window) = self.window() else {
+            return;
+        };
+        let event = match recognizer.state() {
+            UIGestureRecognizerState::Began | UIGestureRecognizerState::Changed => {
+                let location = unsafe { recognizer.locationInView(None) };
+                WindowEvent::CursorMoved {
+                    device_id: DEVICE_ID,
+                    position: self.physical_position(location),
+                }
+            },
+            _ => WindowEvent::CursorLeft { device_id: DEVICE_ID },
+        };
+        let mtm = MainThreadMarker::from(self);
+        app_state::handle_nonuser_event(
+            mtm,
+            EventWrapper::StaticEvent(Event::WindowEvent {
+                window_id: RootWindowId(window.id()),
+                event,
+            }),
+        );
+    }
+
+    /// SolidCraft: see `pencil_did_receive_tap`.
+    fn handle_pencil_squeeze(&self, squeeze: &UIPencilInteractionSqueeze) {
+        let phase = unsafe { squeeze.phase() };
+        if phase == UIPencilInteractionPhase::Began {
+            // Where the tip is, for an app that heard no hover before the squeeze (the Pencil
+            // came into range already squeezed, or hover is switched off).
+            if let (Some(pose), Some(window)) = (unsafe { squeeze.hoverPose() }, self.window()) {
+                let location = unsafe { pose.location() };
+                let mtm = MainThreadMarker::from(self);
+                app_state::handle_nonuser_event(
+                    mtm,
+                    EventWrapper::StaticEvent(Event::WindowEvent {
+                        window_id: RootWindowId(window.id()),
+                        event: WindowEvent::CursorMoved {
+                            device_id: DEVICE_ID,
+                            position: self.physical_position(location),
+                        },
+                    }),
+                );
+            }
+            self.pencil_key(NamedKey::F14, KeyCode::F14, ElementState::Pressed);
+        } else if phase == UIPencilInteractionPhase::Ended {
+            self.pencil_key(NamedKey::F14, KeyCode::F14, ElementState::Released);
+        } else if phase == UIPencilInteractionPhase::Cancelled {
+            self.pencil_key(NamedKey::F15, KeyCode::F15, ElementState::Pressed);
+            self.pencil_key(NamedKey::F15, KeyCode::F15, ElementState::Released);
+            self.pencil_key(NamedKey::F14, KeyCode::F14, ElementState::Released);
+        }
+    }
+
+    /// SolidCraft: one key event for a Pencil gesture.
+    fn pencil_key(&self, key: NamedKey, code: KeyCode, state: ElementState) {
+        let Some(window) = self.window() else {
+            return;
+        };
+        let mtm = MainThreadMarker::from(self);
+        app_state::handle_nonuser_event(
+            mtm,
+            EventWrapper::StaticEvent(Event::WindowEvent {
+                window_id: RootWindowId(window.id()),
+                event: WindowEvent::KeyboardInput {
+                    device_id: DEVICE_ID,
+                    event: KeyEvent {
+                        state,
+                        logical_key: Key::Named(key),
+                        physical_key: PhysicalKey::Code(code),
+                        platform_specific: KeyEventExtra {},
+                        repeat: false,
+                        location: KeyLocation::Standard,
+                        text: None,
+                    },
+                    is_synthetic: false,
+                },
+            }),
+        );
+    }
+
     fn handle_touches(&self, touches: &NSSet<UITouch>) {
         let window = self.window().unwrap();
         let mut touch_events = Vec::new();
@@ -517,6 +675,13 @@ impl WinitView {
                 UITouchPhase::Cancelled => TouchPhase::Cancelled,
                 _ => panic!("unexpected touch phase: {phase:?}"),
             };
+            // SolidCraft: see `touches_down`.
+            let down = &self.ivars().touches_down;
+            match phase {
+                TouchPhase::Started => down.set(down.get() + 1),
+                TouchPhase::Ended | TouchPhase::Cancelled => down.set(down.get().saturating_sub(1)),
+                TouchPhase::Moved => {},
+            }
 
             let physical_location = {
                 let scale_factor = self.contentScaleFactor();
