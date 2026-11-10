@@ -57,6 +57,8 @@ mod ios {
     const DEMO: &str = "SOLIDCRAFT_IOS_PENCIL_DEMO";
     /// The frame the demo's squeeze begins on: the sample is on screen by then.
     const DEMO_FRAME: u32 = 30;
+    /// How far the ring's disc reaches past its keys.
+    const RING_RIM: f32 = 6.0;
 
     struct Shell {
         app: SolveApp,
@@ -102,15 +104,24 @@ mod ios {
                         // The whole square is the ring's, its dead centre included: a tap between the
                         // keys reaches nothing under it.
                         ui.allocate_rect(bounds, egui::Sense::click());
+                        // A rim of disc shows around the keys, which are round and so stay inside it.
                         ui.painter().circle(
                             centre,
-                            bounds.width() / 2.0,
+                            bounds.width() / 2.0 + RING_RIM,
                             tokens.dialog_body.gamma_multiply(0.9),
                             tokens.primary_border(tokens.dialog_border),
                         );
                         for (index, item) in pencil::ITEMS.iter().enumerate() {
                             let on = item.holds().is_some_and(|modifier| held.contains(modifier));
-                            if ui.put(pencil::key_rect(centre, index), egui::Button::new(item.label()).selected(on)).clicked() {
+                            // A dialog's controls on a dialog's body: the pair the theme draws
+                            // apart. A held modifier takes the selection's colours instead.
+                            let key = egui::Button::new(item.label()).corner_radius(pencil::KEY_SIDE / 2.0);
+                            let key = if on {
+                                key.selected(true)
+                            } else {
+                                key.fill(tokens.control_fill).stroke(tokens.control_border_stroke(tokens.control_border))
+                            };
+                            if ui.put(pencil::key_rect(centre, index), key).clicked() {
                                 pressed = Some(*item);
                             }
                         }
