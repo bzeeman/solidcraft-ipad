@@ -71,11 +71,30 @@ mod ios {
         }
     }
 
+    /// eframe's renderer settings, asking the device for no more than its adapter has. The limits
+    /// asked for by default are WebGPU's, and a Metal device older than the Apple4 GPU family
+    /// (before the A11) has 15 inter-stage variables where WebGPU's default is 16. The Simulator
+    /// always reports the Apple2 family, whatever iPad it shows, so there the default request
+    /// fails and the window never opens.
+    fn wgpu_options() -> eframe::egui_wgpu::WgpuConfiguration {
+        let mut options = eframe::egui_wgpu::WgpuConfiguration::default();
+        if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_setup {
+            let base = setup.device_descriptor.clone();
+            setup.device_descriptor = std::sync::Arc::new(move |adapter| {
+                let mut descriptor = base(adapter);
+                descriptor.required_limits = descriptor.required_limits.or_worse_values_from(&adapter.limits());
+                descriptor
+            });
+        }
+        options
+    }
+
     pub fn run() {
         if log::set_logger(&Stderr).is_ok() {
             log::set_max_level(log::LevelFilter::Info);
         }
         let options = eframe::NativeOptions {
+            wgpu_options: wgpu_options(),
             // The window's pass (egui's) has no depth and one sample: the viewport draws its scene
             // offscreen with its own depth and MSAA, then blits it (as the desktop app does).
             depth_buffer: 0,
@@ -103,6 +122,12 @@ mod ios {
                         app.preferences.msaa = samples;
                         solidcraft_ui_egui::gpu::install_picture_renderer(rs);
                         log::info!(target: "solidcraft_ios", "graphics: {:?} {} ({}), MSAA {samples}x", info.backend, info.name, info.driver);
+                        // What the Simulator's device lacks next to a real iPad's.
+                        let downlevel = rs.adapter.get_downlevel_capabilities();
+                        if !downlevel.is_webgpu_compliant() {
+                            let missing = eframe::wgpu::DownlevelFlags::compliant() - downlevel.flags;
+                            log::info!(target: "solidcraft_ios", "graphics: the device is below WebGPU's baseline, without {missing:?}");
+                        }
                     }
                     None => log::error!(target: "solidcraft_ios", "no wgpu render state: the viewport stays empty"),
                 }

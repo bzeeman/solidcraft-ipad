@@ -4,7 +4,8 @@
 #
 #   $OUT/shot-<seconds>.png     the simulator's screen that long after launch
 #   $OUT/stderr.log             what the app logged (and a panic message, if it panicked)
-#   $OUT/crash-*.ips            the system's crash report, if the app crashed
+#   $OUT/solidcraft-ios*.ips    the system's crash report, if the app crashed
+#   $OUT/system.log             the simulator's log of the app, if the app stopped
 #
 # Usage: packaging/ios/run-sim.sh [SolidCraft.app]
 #   SIM_DEVICE   the simulator to use (default: the newest iPad Pro 13-inch, else any iPad)
@@ -72,6 +73,8 @@ else
   # The system writes its report a moment after the crash.
   sleep 5
   find "$HOME/Library/Logs/DiagnosticReports" -name 'solidcraft-ios*' -newer "$APP/Info.plist" -exec cp {} "$OUT/" \; 2> /dev/null || true
+  # What the simulator's own log says of the app (a refused launch, a kill by the system).
+  xcrun simctl spawn "$UDID" log show --style compact --last 5m --predicate 'process == "solidcraft-ios"' > "$OUT/system.log" 2> /dev/null || true
 fi
 echo "--- stderr.log"
 cat "$OUT/stderr.log" 2> /dev/null || true

@@ -4,6 +4,9 @@
 # Runs on pushes to the spike's branch only, and by hand. The bundle (SolidCraft-ios-sim) runs in
 # the Simulator of any Apple silicon Mac with Xcode: unzip it and drag SolidCraft.app onto a
 # running iPad simulator, or `xcrun simctl install booted SolidCraft.app`.
+#
+# The pictures and the log also go to the ios-sim-results branch (one commit, replaced by each
+# run), where git alone can fetch them.
 name: iPad simulator
 
 on:
@@ -12,7 +15,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # Pushes the ios-sim-results branch.
+  contents: write
 
 concurrency:
   group: ios-sim-${{ github.ref }}
@@ -28,6 +32,13 @@ jobs:
       PROFILE: ci
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Our own crates are most of the build, and cargo rebuilds them all after a checkout (their
+      # sources are newer than the cached build). sccache answers every unchanged crate from
+      # GitHub's cache instead; rust-cache below keeps the dependencies.
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+        with:
+          version: v0.16.0
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-ios-sim
@@ -41,7 +52,15 @@ jobs:
           xcodebuild -version
           xcrun simctl list devices available | grep -i ipad || true
       - name: Build and bundle
-        run: packaging/ios/bundle-sim.sh --profile "$PROFILE"
+        env:
+          # On this step only: rust-cache's key takes in every RUST* variable of the job.
+          RUSTC_WRAPPER: sccache
+          SCCACHE_GHA_ENABLED: "true"
+          # Without the cache service, compile as usual.
+          SCCACHE_IGNORE_SERVER_IO_ERROR: "1"
+        run: |
+          packaging/ios/bundle-sim.sh --profile "$PROFILE"
+          sccache --show-stats || true
       - name: Launch in an iPad simulator
         id: launch
         run: packaging/ios/run-sim.sh
@@ -57,3 +76,20 @@ jobs:
           name: SolidCraft-ios-sim
           path: dist/ios-sim/SolidCraft-ios-sim.zip
           if-no-files-found: warn
+      - name: Publish the run to the ios-sim-results branch
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$(ls -A dist/ios-sim/run 2> /dev/null)" ]; then
+            echo "nothing to publish"
+            exit 0
+          fi
+          work="$(mktemp -d)"
+          cp -R dist/ios-sim/run/. "$work/"
+          cd "$work"
+          git init -q -b ios-sim-results
+          git add -A
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "iPad simulator run $GITHUB_RUN_ID of $GITHUB_SHA"
+          git push -q --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" ios-sim-results
