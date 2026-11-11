@@ -14,6 +14,10 @@
 #                SIMCTL_CHILD_SOLIDCRAFT_IOS_PENCIL_DEMO=ring: the app squeezes an Apple Pencil for
 #                itself and holds on, so the pictures show the ring of keys (the simulator has
 #                no Pencil)
+#                SIMCTL_CHILD_SOLIDCRAFT_IOS_TOUCH_DEMO=camera: the app puts fingers of its own on
+#                the model (a tap, a two-finger pan, a pinch, a one-finger orbit) and logs what
+#                the camera did, ending in "touch demo: the camera moved as expected" when it
+#                did what fingers should
 #
 # Needs Xcode with an iOS simulator runtime. Exits non-zero when the app is no longer running
 # after the last picture.

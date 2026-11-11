@@ -1,6 +1,7 @@
 # The iPad spike (apps/solidcraft-ios), on GitHub Macs. Three jobs:
 #
-# - simulator: build SolidCraft for the iOS simulator, start it in an iPad simulator and keep
+# - simulator: build SolidCraft for the iOS simulator, start it in an iPad simulator (once with
+#   an Apple Pencil's squeeze, once with fingers moving the view, both the app's own) and keep
 #   pictures of its screen, its log and the app bundle. The bundle (SolidCraft-ios-sim) runs in
 #   the Simulator of any Apple silicon Mac with Xcode: unzip it and drag SolidCraft.app onto a
 #   running iPad simulator, or `xcrun simctl install booted SolidCraft.app`. The pictures and the
@@ -81,6 +82,18 @@ jobs:
           # the pictures show the ring of keys (apps/solidcraft-ios/src/main.rs, `DEMO`).
           SIMCTL_CHILD_SOLIDCRAFT_IOS_PENCIL_DEMO: ring
         run: packaging/ios/run-sim.sh
+      - name: Move the view with fingers in the simulator
+        env:
+          # A simulator on a build machine has no fingers either: the app puts its own on the
+          # model (a tap, two carrying it, two spreading, one dragging) and says in its log what
+          # the selection and the camera did (apps/solidcraft-ios/src/main.rs, `TOUCH_DEMO`).
+          SIMCTL_CHILD_SOLIDCRAFT_IOS_TOUCH_DEMO: camera
+          OUT: dist/ios-sim/run/touch
+          SIM_SHOTS: "10 25"
+        run: |
+          packaging/ios/run-sim.sh
+          grep -F "touch" dist/ios-sim/run/touch/stderr.log || true
+          grep -qF "touch demo: the camera moved as expected" dist/ios-sim/run/touch/stderr.log
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:

@@ -156,6 +156,9 @@ pub struct Pencil {
     hover: VecDeque<(f64, Pos2)>,
     /// The primary button is down: the tip (or a finger) is on the screen.
     down: bool,
+    /// The pointer is a finger's in this frame ([`Pencil::fingers`]): it says nothing of where
+    /// the tip hovers.
+    fingers: bool,
     squeeze: Option<Squeeze>,
     /// Where the app sees the pointer while a squeeze and its click last, whatever the tip does.
     pin: Option<Pos2>,
@@ -222,8 +225,8 @@ impl Pencil {
                     }
                 }
                 Event::PointerMoved(at) => {
-                    if self.down {
-                        // In contact: a stroke, never pinned.
+                    if self.down || self.fingers {
+                        // In contact: a stroke, never pinned. A finger's: not the tip's hover.
                         events.push(Event::PointerMoved(at));
                         continue;
                     }
@@ -283,6 +286,12 @@ impl Pencil {
         heard
     }
 
+    /// Say before [`Pencil::frame`] whether the pointer is a finger's in this frame. Where a
+    /// finger goes is not where the tip hovers, so a squeeze must not click there.
+    pub fn fingers(&mut self, fingers: bool) {
+        self.fingers = fingers;
+    }
+
     /// Press a key of the ring: by letting a held squeeze go over it, or by a tap on it. The ring
     /// closes either way.
     pub fn press(&mut self, item: Item) -> Option<Action> {
@@ -329,6 +338,7 @@ impl Pencil {
     pub fn readout(&self) -> Vec<String> {
         let mut lines = Vec::with_capacity(self.notes.len() + 2);
         lines.push(match (self.down, self.hover.back()) {
+            _ if self.fingers => "tip: not known while fingers are on the screen".to_owned(),
             (true, _) => "tip: on the screen".to_owned(),
             (false, Some((_, at))) => format!("tip: hovering at {:.0}, {:.0}", at.x, at.y),
             (false, None) => "tip: out of range".to_owned(),
@@ -729,6 +739,31 @@ mod tests {
         frame(&mut pencil, 1.0, vec![Event::PointerMoved(at), key(SQUEEZE, true)], false);
         let (heard, _) = frame(&mut pencil, 1.1, vec![key(SQUEEZE, false)], false);
         assert_eq!(heard.actions, vec![Action::Click { at, modifiers: Modifiers::NONE }]);
+    }
+
+    #[test]
+    fn where_a_finger_goes_is_not_where_the_tip_hovers() {
+        let mut pencil = Pencil::default();
+        let tip = Pos2::new(400.0, 500.0);
+        hover(&mut pencil, tip, 0.3);
+        // A finger comes down elsewhere and waits: the pointer goes there, the tip's place stays.
+        let finger = Pos2::new(900.0, 200.0);
+        pencil.fingers(true);
+        let (_, seen) = frame(&mut pencil, 0.4, vec![Event::PointerMoved(finger)], false);
+        assert_eq!(seen, vec![Event::PointerMoved(finger)]);
+        assert_eq!(pencil.tip(), Some(tip));
+        assert_eq!(pencil.readout().first().map(String::as_str), Some("tip: not known while fingers are on the screen"));
+        // A squeeze now clicks where the tip hovered, not under the finger; the finger's pointer
+        // is not pinned there.
+        let (_, seen) = frame(&mut pencil, 0.5, vec![key(SQUEEZE, true), Event::PointerMoved(finger)], false);
+        assert_eq!(seen, vec![Event::PointerMoved(finger)]);
+        let (heard, _) = frame(&mut pencil, 0.6, vec![key(SQUEEZE, false)], false);
+        assert_eq!(heard.actions, vec![Action::Click { at: tip, modifiers: Modifiers::NONE }]);
+        // The finger lifts: the pointer is gone, and with it what was known of the tip, until
+        // it is seen to hover again.
+        pencil.fingers(false);
+        frame(&mut pencil, 0.7, vec![Event::PointerGone], true);
+        assert_eq!(pencil.tip(), None);
     }
 
     #[test]
