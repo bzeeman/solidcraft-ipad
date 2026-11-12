@@ -35,15 +35,17 @@ const SETTLED: u32 = 10;
 /// and at a few hundred frames a second its whole drag would fit into them.
 const DEMO_STEP: f64 = 0.015;
 
-/// Which self-tests run for these values of [`DEMO`] and [`TOUCH_DEMO`]: the Pencil's, the
-/// fingers'. Never both: the Pencil's leaves its ring of keys open over the middle of the view,
-/// where the fingers' test pinches and drags. A simulator hands the app of a second launch the
-/// variables of the first as well (run 43136793893: the ring opened in the fingers' run, whose
-/// launch asked for no ring, and their pinch and drag landed on it), so both can be set where
-/// one was asked for; the fingers' test then runs, being the one that judges itself.
+/// Which self-tests these values of [`DEMO`] and [`TOUCH_DEMO`] ask for: the Pencil's, the
+/// fingers'. One launch may ask for both, and the simulator job does: the fingers' test runs
+/// first and the Pencil's after it, because the Pencil's leaves its ring of keys open over the
+/// middle of the view, where the fingers pinch and drag.
+///
+/// Two launches cannot ask for one each. A second launch of the app in the same simulator got
+/// the first launch's variables: a name the first had not set arrived (run 43136793893, where
+/// the ring opened under the fingers), a new value for a name it had set did not (run
+/// 43140259299, where the fingers' test never ran).
 fn asked(pencil: Option<&str>, fingers: Option<&str>) -> (bool, bool) {
-    let camera = fingers == Some("camera");
-    (pencil == Some("ring") && !camera, camera)
+    (pencil == Some("ring"), fingers == Some("camera"))
 }
 
 /// Where the camera looks: what the self-test compares before and after its fingers.
@@ -118,14 +120,15 @@ pub struct Input {
 }
 
 impl Input {
-    /// With the self-test the environment asks for ([`DEMO`], [`TOUCH_DEMO`]), and a line in
+    /// With the self-tests the environment asks for ([`DEMO`], [`TOUCH_DEMO`]), and a line in
     /// the log that says what it asked.
     pub fn from_env() -> Self {
         let (pencil, fingers) = (std::env::var(DEMO).ok(), std::env::var(TOUCH_DEMO).ok());
         let (ring, camera) = asked(pencil.as_deref(), fingers.as_deref());
         if pencil.is_some() || fingers.is_some() {
             let run = match (ring, camera) {
-                (_, true) => "the fingers' self-test runs",
+                (true, true) => "the fingers' self-test runs, then the Pencil's",
+                (false, true) => "the fingers' self-test runs",
                 (true, false) => "the Pencil's self-test runs",
                 (false, false) => "no self-test runs",
             };
@@ -207,8 +210,13 @@ impl Input {
         }
     }
 
-    /// See [`DEMO`]: the tip hovers mid-screen, then a squeeze that is never let go.
+    /// See [`DEMO`]: the tip hovers mid-screen, then a squeeze that is never let go. Not while
+    /// the fingers' self-test runs: the hover would move the pointer under its fingers, and the
+    /// ring would open over the view they work on.
     fn demo_input(&mut self, content: Rect, raw: &mut egui::RawInput) {
+        if self.touch_demo.is_some() {
+            return;
+        }
         let Some(frames) = self.demo else {
             return;
         };
@@ -356,18 +364,28 @@ mod tests {
     #[test]
     fn the_apps_own_fingers_select_carry_zoom_and_turn_the_sample() {
         let mut h = sample();
-        let mut input = Input { touch_demo: Some(TouchDemo::default()), ..Default::default() };
+        // Both self-tests asked for, as the simulator job asks: the fingers' first.
+        let mut input = Input { demo: Some(0), touch_demo: Some(TouchDemo::default()), ..Default::default() };
         let mut time = 10.0;
         for _ in 0..600 {
-            if !input.busy() {
+            frame(&mut h, &mut input, &mut time, Vec::new());
+            // The Pencil's begins in the frame the fingers' ends in.
+            if input.touch_demo.is_none() {
                 break;
             }
-            frame(&mut h, &mut input, &mut time, Vec::new());
+            assert_eq!(input.demo, Some(0), "the Pencil's self-test waits for the fingers'");
+            assert!(input.pencil.ring().is_none());
         }
-        assert!(!input.busy(), "the self-test never ended: {:#?}", input.touch_report);
+        assert!(input.touch_demo.is_none(), "the self-test never ended: {:#?}", input.touch_report);
         assert_eq!(input.touch_report.last().map(String::as_str), Some("touch demo: the camera moved as expected"), "{:#?}", input.touch_report);
         assert_eq!(h.app.viewport.nav, None, "the Orbit mode the drag lit is out again");
         assert_eq!(input.readout().last().map(String::as_str), Some("touch demo: the camera moved as expected"));
+        // Then the Pencil's: its squeeze, held, opens the ring.
+        for _ in 0..120 {
+            frame(&mut h, &mut input, &mut time, Vec::new());
+        }
+        assert!(!input.busy());
+        assert!(input.pencil.ring().is_some(), "{:?}", input.readout());
     }
 
     #[test]
@@ -472,13 +490,11 @@ mod tests {
         let input = Input::from_env();
         assert!(!input.busy());
         assert!(Input { demo: Some(0), ..Default::default() }.busy());
-        // (the Pencil's, the fingers'): one at a time, and the fingers' when both are asked for.
+        // (the Pencil's, the fingers').
         assert_eq!(asked(None, None), (false, false));
         assert_eq!(asked(Some("ring"), None), (true, false));
-        assert_eq!(asked(Some("ring"), Some("off")), (true, false));
         assert_eq!(asked(None, Some("camera")), (false, true));
-        assert_eq!(asked(Some("ring"), Some("camera")), (false, true));
-        assert_eq!(asked(Some("off"), Some("camera")), (false, true));
+        assert_eq!(asked(Some("ring"), Some("camera")), (true, true));
         assert_eq!(asked(Some("1"), Some("yes")), (false, false));
     }
 

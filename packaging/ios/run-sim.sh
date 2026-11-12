@@ -18,6 +18,8 @@
 #                the model (a tap, a two-finger pan, a pinch, a one-finger orbit) and logs what
 #                the camera did, ending in "touch demo: the camera moved as expected" when it
 #                did what fingers should
+#                Give both in one launch (the fingers go first). A second launch in the same
+#                simulator got the first launch's variables, not its own.
 #
 # Needs Xcode with an iOS simulator runtime. Exits non-zero when the app is no longer running
 # after the last picture.
