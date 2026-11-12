@@ -35,6 +35,17 @@ const SETTLED: u32 = 10;
 /// and at a few hundred frames a second its whole drag would fit into them.
 const DEMO_STEP: f64 = 0.015;
 
+/// Which self-tests run for these values of [`DEMO`] and [`TOUCH_DEMO`]: the Pencil's, the
+/// fingers'. Never both: the Pencil's leaves its ring of keys open over the middle of the view,
+/// where the fingers' test pinches and drags. A simulator hands the app of a second launch the
+/// variables of the first as well (run 43136793893: the ring opened in the fingers' run, whose
+/// launch asked for no ring, and their pinch and drag landed on it), so both can be set where
+/// one was asked for; the fingers' test then runs, being the one that judges itself.
+fn asked(pencil: Option<&str>, fingers: Option<&str>) -> (bool, bool) {
+    let camera = fingers == Some("camera");
+    (pencil == Some("ring") && !camera, camera)
+}
+
 /// Where the camera looks: what the self-test compares before and after its fingers.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Look {
@@ -107,13 +118,20 @@ pub struct Input {
 }
 
 impl Input {
-    /// With the self-tests the environment asks for ([`DEMO`], [`TOUCH_DEMO`]).
+    /// With the self-test the environment asks for ([`DEMO`], [`TOUCH_DEMO`]), and a line in
+    /// the log that says what it asked.
     pub fn from_env() -> Self {
-        Self {
-            demo: std::env::var(DEMO).is_ok_and(|demo| demo == "ring").then_some(0),
-            touch_demo: std::env::var(TOUCH_DEMO).is_ok_and(|demo| demo == "camera").then(TouchDemo::default),
-            ..Self::default()
+        let (pencil, fingers) = (std::env::var(DEMO).ok(), std::env::var(TOUCH_DEMO).ok());
+        let (ring, camera) = asked(pencil.as_deref(), fingers.as_deref());
+        if pencil.is_some() || fingers.is_some() {
+            let run = match (ring, camera) {
+                (_, true) => "the fingers' self-test runs",
+                (true, false) => "the Pencil's self-test runs",
+                (false, false) => "no self-test runs",
+            };
+            log::info!(target: "solidcraft_ios", "self-tests: {DEMO}={pencil:?}, {TOUCH_DEMO}={fingers:?}: {run}");
         }
+        Self { demo: ring.then_some(0), touch_demo: camera.then(TouchDemo::default), ..Self::default() }
     }
 
     /// A self-test runs: frames must keep coming though no input does.
@@ -454,6 +472,14 @@ mod tests {
         let input = Input::from_env();
         assert!(!input.busy());
         assert!(Input { demo: Some(0), ..Default::default() }.busy());
+        // (the Pencil's, the fingers'): one at a time, and the fingers' when both are asked for.
+        assert_eq!(asked(None, None), (false, false));
+        assert_eq!(asked(Some("ring"), None), (true, false));
+        assert_eq!(asked(Some("ring"), Some("off")), (true, false));
+        assert_eq!(asked(None, Some("camera")), (false, true));
+        assert_eq!(asked(Some("ring"), Some("camera")), (false, true));
+        assert_eq!(asked(Some("off"), Some("camera")), (false, true));
+        assert_eq!(asked(Some("1"), Some("yes")), (false, false));
     }
 
     fn pencil_button(at: Pos2, pressed: bool) -> Event {

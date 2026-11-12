@@ -81,6 +81,9 @@ jobs:
           # The simulator has no Apple Pencil: the app squeezes one for itself and holds on, so
           # the pictures show the ring of keys (apps/solidcraft-ios/src/main.rs, `DEMO`).
           SIMCTL_CHILD_SOLIDCRAFT_IOS_PENCIL_DEMO: ring
+          # Said out loud, because a launch seems to inherit the last launch's variables (see
+          # the next step).
+          SIMCTL_CHILD_SOLIDCRAFT_IOS_TOUCH_DEMO: "off"
         run: packaging/ios/run-sim.sh
       - name: Move the view with fingers in the simulator
         env:
@@ -88,6 +91,10 @@ jobs:
           # model (a tap, two carrying it, two spreading, one dragging) and says in its log what
           # the selection and the camera did (apps/solidcraft-ios/src/main.rs, `TOUCH_DEMO`).
           SIMCTL_CHILD_SOLIDCRAFT_IOS_TOUCH_DEMO: camera
+          # Run 43136793893: the ring of keys of the step before opened in this launch too,
+          # though this step never asked for it, and the fingers' pinch and drag landed on it.
+          # The app runs one self-test at a time and logs the variables it was given.
+          SIMCTL_CHILD_SOLIDCRAFT_IOS_PENCIL_DEMO: "off"
           OUT: dist/ios-sim/run/touch
           SIM_SHOTS: "10 25"
         run: |
