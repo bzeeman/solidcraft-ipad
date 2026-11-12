@@ -19,6 +19,13 @@
 //!   alone;
 //! - a third finger does nothing.
 //!
+//! Two fingers meant to land together seldom do, and the first is often moving already. On the
+//! iPad that turned the view a few degrees before every third two-finger gesture. So a finger
+//! begins no drag in its first [`SETTLE`] seconds on the screen, however far it goes: a second
+//! finger that lands in them finds no drag to end. And a second finger (or the Pencil's tip)
+//! that lands within [`JOIN`] of a drag's beginning takes that drag back
+//! ([`Heard::taken_back`]): the shell puts the view back where the drag found it.
+//!
 //! A click is read where the pointer is, so the pointer stays where a finger or the tip let go
 //! for the rest of that frame and leaves the screen in the next. (The window layer takes it away
 //! in the frame of the release, and a tap on the model then selected nothing.)
@@ -39,6 +46,15 @@ pub const SLOP: f32 = 10.0;
 /// A finger lifted later than this (seconds) without having moved clicks nothing: egui gives a
 /// mouse button the same time.
 pub const TAP: f64 = 0.8;
+/// A finger begins no drag in its first moments on the screen (seconds), however far it moves:
+/// the second finger of a pair lands within them more often than not. A guess until the iPad's
+/// log says how far apart Ben's two fingers land (the note of a second finger gives the time).
+pub const SETTLE: f64 = 0.07;
+/// A second finger, or the Pencil's tip, that lands this soon (seconds) after a finger's drag
+/// began takes the drag back: the two were one gesture, begun a finger at a time. Counted from
+/// the drag's beginning, not the finger's: a finger (or a hand) that has rested a while and
+/// starts to slide as the other comes down is the same mistake.
+pub const JOIN: f64 = 0.4;
 /// Two fingers closer together than this (points) do not zoom: the ratio of two small distances
 /// is noise.
 const MIN_SPREAD: f32 = 24.0;
@@ -63,11 +79,12 @@ enum Mode {
     Idle,
     /// One finger is down and has not moved [`SLOP`] from `origin` yet.
     Waiting { finger: Touch, origin: Pos2, since: f64 },
-    /// One finger drags with the left button, pressed at `origin`. The press has a frame to
-    /// itself: until `shown`, the app has not seen the pointer leave `origin`.
-    Drag { finger: Touch, origin: Pos2, shown: bool },
-    /// Two fingers scroll and pinch; how far and how much so far, for the readout.
-    Two { a: Touch, b: Touch, moved: Vec2, zoomed: f32 },
+    /// One finger drags with the left button, pressed at `origin` at the time `since`. The press
+    /// has a frame to itself: until `shown`, the app has not seen the pointer leave `origin`.
+    Drag { finger: Touch, origin: Pos2, since: f64, shown: bool },
+    /// Two fingers scroll and pinch; how far and how much so far, since when and from where
+    /// (the point between them), for the readout and the log.
+    Two { a: Touch, b: Touch, moved: Vec2, zoomed: f32, since: f64, from: Pos2 },
     /// One of two fingers lifted: the other waits for a second one, and alone does nothing.
     Rest { finger: Touch },
 }
@@ -80,12 +97,23 @@ pub struct Heard {
     pub drag: Option<Pos2>,
     /// The pointer is a finger's in this frame (or between two of them), not the Pencil's.
     pub fingers: bool,
+    /// The drag that ends in this frame was the first of two fingers that came down one after
+    /// the other, or a hand that came down before the Pencil's tip: what it did to the view is
+    /// to be undone.
+    pub taken_back: bool,
     /// Look again after this many seconds even if no input arrives: a press or a release has a
-    /// frame to itself and what follows it is owed, or a drag has ended and the shell has
-    /// something to undo.
+    /// frame to itself and what follows it is owed, a drag has ended and the shell has
+    /// something to undo, or a finger's first moments are over and its drag may begin.
     pub wake: Option<f64>,
     /// The gestures that ended in this frame, for the log.
     pub notes: Vec<String>,
+}
+
+impl Heard {
+    /// Look again after `after` seconds at the latest.
+    fn wake(&mut self, after: f64) {
+        self.wake = Some(self.wake.map_or(after, |wake| wake.min(after)));
+    }
 }
 
 /// The touches on the screen, from one frame to the next.
@@ -179,13 +207,13 @@ impl Touches {
         }
         self.let_go(&mut out);
         match self.mode {
-            Mode::Drag { finger, origin, shown } => {
+            Mode::Drag { finger, origin, since, shown } => {
                 heard.drag = Some(origin);
                 heard.fingers = true;
                 if !shown {
                     // The press was the last frame's; now the pointer goes where the finger is.
                     point(&mut out, finger.at);
-                    self.mode = Mode::Drag { finger, origin, shown: true };
+                    self.mode = Mode::Drag { finger, origin, since, shown: true };
                 }
             }
             Mode::Waiting { .. } | Mode::Two { .. } => heard.fingers = true,
@@ -210,13 +238,51 @@ impl Touches {
                 out.pass(event);
             }
         }
+        self.ripen(&mut out, &mut heard);
         if out.let_go {
             // The click is read where the pointer is: it stays for this frame.
             self.gone = true;
-            heard.wake = Some(0.0);
+            heard.wake(0.0);
         }
         raw.events = out.events;
         heard
+    }
+
+    /// What is left (seconds) of the first moments of a finger down since `since`, while any is.
+    /// A clock that ran backwards leaves none.
+    fn settling(&self, since: f64) -> Option<f64> {
+        let left = SETTLE - (self.now - since);
+        (left > 0.0 && left <= SETTLE).then_some(left)
+    }
+
+    /// At the end of a frame's input: a finger still alone and further than [`SLOP`] from where
+    /// it came down begins its drag, once its first moments are over.
+    fn ripen(&mut self, out: &mut Out, heard: &mut Heard) {
+        let Mode::Waiting { finger, origin, since } = self.mode else {
+            return;
+        };
+        if origin.distance(finger.at) <= SLOP {
+            return;
+        }
+        if let Some(left) = self.settling(since) {
+            heard.wake(left);
+            return;
+        }
+        // The press is where the finger came down, as a mouse's would be, and the way from
+        // there is the next frame's: egui presses what is under the pointer at the end of the
+        // frame.
+        out.extend([Event::PointerMoved(origin), button(origin, true)]);
+        self.mode = Mode::Drag { finger, origin, since: self.now, shown: false };
+        heard.drag = Some(origin);
+        heard.fingers = true;
+        heard.wake(0.0);
+    }
+
+    /// Whether a drag begun at `since` is joined soon enough (see [`JOIN`]) to be taken back,
+    /// and how long it has lasted.
+    fn joined(&self, since: f64) -> (bool, f64) {
+        let held = self.now - since;
+        ((0.0..=JOIN).contains(&held), held)
     }
 
     /// What the fingers are doing and their latest gestures, a line each, for the spike's
@@ -292,15 +358,22 @@ impl Touches {
         match std::mem::replace(&mut self.mode, Mode::Idle) {
             Mode::Idle => {}
             Mode::Waiting { finger, .. } | Mode::Rest { finger } => self.ignore(finger.id),
-            Mode::Drag { finger, origin, .. } => {
+            Mode::Drag { finger, origin, since, .. } => {
                 out.push(button(finger.at, false));
                 // The tip's press must not be read as the drag's: the shell lets go of the
                 // drag's mode before this frame.
                 heard.drag = None;
                 self.ignore(finger.id);
-                self.note(format!("one finger dragged {:.0} pt, then the Pencil came down", origin.distance(finger.at)), heard);
+                // A hand that came down a moment before the tip was no drag.
+                let (young, held) = self.joined(since);
+                heard.taken_back = young;
+                let undone = if young { ": taken back" } else { "" };
+                self.note(
+                    format!("one finger dragged {:.0} pt in {held:.2} s, then the Pencil came down{undone}", origin.distance(finger.at)),
+                    heard,
+                );
             }
-            Mode::Two { a, b, moved, zoomed } => {
+            Mode::Two { a, b, moved, zoomed, .. } => {
                 out.push(wheel(TouchPhase::End, Vec2::ZERO));
                 self.ignore(a.id);
                 self.ignore(b.id);
@@ -330,13 +403,26 @@ impl Touches {
                 out.push(Event::PointerMoved(touch.at));
                 self.mode = Mode::Waiting { finger: touch, origin: touch.at, since: self.now };
             }
-            Mode::Waiting { finger, .. } | Mode::Rest { finger } => self.two(finger, touch, out),
-            Mode::Drag { finger, origin, .. } => {
+            Mode::Waiting { finger, origin, since } => {
+                // For the log only: how far apart in time two fingers land is what SETTLE and
+                // JOIN are guesses at.
+                heard.notes.push(format!(
+                    "a second finger came down {:.2} s after the first, which had moved {:.0} pt",
+                    self.now - since,
+                    origin.distance(finger.at)
+                ));
+                self.two(finger, touch, out);
+            }
+            Mode::Rest { finger } => self.two(finger, touch, out),
+            Mode::Drag { finger, origin, since, .. } => {
                 // Past the slop, so this release is no click.
                 out.push(button(finger.at, false));
                 heard.drag = Some(origin);
-                heard.wake = Some(0.0);
-                self.note(format!("one finger dragged {:.0} pt, then a second came down", origin.distance(finger.at)), heard);
+                heard.wake(0.0);
+                let (young, held) = self.joined(since);
+                heard.taken_back = young;
+                let undone = if young { ": taken back" } else { "" };
+                self.note(format!("one finger dragged {:.0} pt in {held:.2} s, then a second came down{undone}", origin.distance(finger.at)), heard);
                 self.two(finger, touch, out);
             }
             Mode::Two { .. } => self.ignore(touch.id),
@@ -345,9 +431,10 @@ impl Touches {
 
     /// Two fingers begin a scroll, with the pointer between them.
     fn two(&mut self, a: Touch, b: Touch, out: &mut Out) {
-        point(out, between(a.at, b.at));
+        let from = between(a.at, b.at);
+        point(out, from);
         out.push(wheel(TouchPhase::Start, Vec2::ZERO));
-        self.mode = Mode::Two { a, b, moved: Vec2::ZERO, zoomed: 1.0 };
+        self.mode = Mode::Two { a, b, moved: Vec2::ZERO, zoomed: 1.0, since: self.now, from };
     }
 
     fn moved(&mut self, touch: Touch, out: &mut Out, heard: &mut Heard) {
@@ -360,28 +447,20 @@ impl Touches {
         }
         match self.mode {
             Mode::Waiting { finger, origin, since } if finger.id == touch.id => {
+                // Whether it drags is decided when the frame's input is read ([`Self::ripen`]):
+                // a second finger may be next in it.
                 heard.fingers = true;
-                if origin.distance(touch.at) > SLOP {
-                    // The press is where the finger came down, as a mouse's would be, and the
-                    // way from there is the next frame's: egui presses what is under the
-                    // pointer at the end of the frame.
-                    out.extend([Event::PointerMoved(origin), button(origin, true)]);
-                    self.mode = Mode::Drag { finger: touch, origin, shown: false };
-                    heard.drag = Some(origin);
-                    heard.wake = Some(0.0);
-                } else {
-                    out.push(Event::PointerMoved(touch.at));
-                    self.mode = Mode::Waiting { finger: touch, origin, since };
-                }
+                out.push(Event::PointerMoved(touch.at));
+                self.mode = Mode::Waiting { finger: touch, origin, since };
             }
-            Mode::Drag { finger, origin, shown } if finger.id == touch.id => {
+            Mode::Drag { finger, origin, since, shown } if finger.id == touch.id => {
                 heard.fingers = true;
                 if shown {
                     out.push(Event::PointerMoved(touch.at));
                 }
-                self.mode = Mode::Drag { finger: touch, origin, shown };
+                self.mode = Mode::Drag { finger: touch, origin, since, shown };
             }
-            Mode::Two { a, b, mut moved, mut zoomed } if a.id == touch.id || b.id == touch.id => {
+            Mode::Two { a, b, mut moved, mut zoomed, since, from } if a.id == touch.id || b.id == touch.id => {
                 heard.fingers = true;
                 let (centre, spread) = (between(a.at, b.at), a.at.distance(b.at));
                 let (a, b) = if a.id == touch.id { (touch, b) } else { (a, touch) };
@@ -399,7 +478,7 @@ impl Touches {
                         zoomed *= factor;
                     }
                 }
-                self.mode = Mode::Two { a, b, moved, zoomed };
+                self.mode = Mode::Two { a, b, moved, zoomed, since, from };
             }
             Mode::Rest { finger } if finger.id == touch.id => self.mode = Mode::Rest { finger: touch },
             _ => {}
@@ -423,31 +502,53 @@ impl Touches {
                 heard.fingers = true;
                 self.mode = Mode::Idle;
                 let held = self.now - since;
-                if ended && (0.0..=TAP).contains(&held) {
+                // Past the slop with no drag begun: it went that far in its first moments, or
+                // within one frame's input. A flick too short to be meant.
+                let went = origin.distance(at.unwrap_or(finger.at));
+                if ended && went <= SLOP && (0.0..=TAP).contains(&held) {
                     out.extend([Event::PointerMoved(origin), button(origin, true)]);
                     self.release = Some(origin);
-                    heard.wake = Some(0.0);
-                    self.note(format!("finger tap at {:.0}, {:.0}", origin.x, origin.y), heard);
+                    heard.wake(0.0);
+                    self.note(format!("finger tap at {:.0}, {:.0} after {held:.2} s", origin.x, origin.y), heard);
                 } else {
                     out.push(Event::PointerGone);
-                    let why = if ended { format!("lifted after {held:.1} s without moving") } else { "taken back by the system".to_owned() };
+                    let why = if !ended {
+                        "taken back by the system".to_owned()
+                    } else if went > SLOP {
+                        format!("lifted {went:.0} pt away after {held:.2} s, before a drag began")
+                    } else {
+                        format!("lifted after {held:.1} s without moving")
+                    };
                     self.note(format!("finger {why}: nothing done"), heard);
                 }
             }
-            Mode::Drag { finger, origin, .. } if finger.id == id => {
+            Mode::Drag { finger, origin, since, .. } if finger.id == id => {
                 heard.fingers = true;
                 heard.drag = Some(origin);
-                heard.wake = Some(0.0);
+                heard.wake(0.0);
                 let at = at.unwrap_or(finger.at);
                 out.extend([Event::PointerMoved(at), button(at, false)]);
                 self.mode = Mode::Idle;
-                self.note(format!("one finger dragged {:.0} pt from {:.0}, {:.0}", origin.distance(at), origin.x, origin.y), heard);
+                self.note(
+                    format!("one finger dragged {:.0} pt from {:.0}, {:.0} in {:.2} s", origin.distance(at), origin.x, origin.y, self.now - since),
+                    heard,
+                );
             }
-            Mode::Two { a, b, moved, zoomed } if a.id == id || b.id == id => {
+            Mode::Two { a, b, moved, zoomed, since, from } if a.id == id || b.id == id => {
                 heard.fingers = true;
                 out.extend([wheel(TouchPhase::End, Vec2::ZERO), Event::PointerGone]);
                 self.mode = Mode::Rest { finger: if a.id == id { b } else { a } };
-                self.note(format!("two fingers moved {:.0}, {:.0} pt and zoomed x{zoomed:.2}", moved.x, moved.y), heard);
+                self.note(
+                    format!(
+                        "two fingers moved {:.0}, {:.0} pt and zoomed x{zoomed:.2} from {:.0}, {:.0} in {:.2} s",
+                        moved.x,
+                        moved.y,
+                        from.x,
+                        from.y,
+                        self.now - since
+                    ),
+                    heard,
+                );
             }
             Mode::Rest { finger } if finger.id == id => self.mode = Mode::Idle,
             _ => self.ignored.retain(|ignored| *ignored != id),
@@ -585,7 +686,7 @@ mod tests {
         assert_eq!(seen, vec![Event::PointerMoved(down), button(down, true)]);
         assert_eq!(heard.wake, Some(0.0), "the release needs a frame of its own");
         assert!(heard.drag.is_none());
-        assert_eq!(heard.notes, vec!["finger tap at 300, 400".to_owned()]);
+        assert_eq!(heard.notes, vec!["finger tap at 300, 400 after 0.10 s".to_owned()]);
         // The release with the pointer still there (the app reads a click where the pointer
         // is), and the pointer's going a frame after that.
         let (heard, seen) = frame(&mut touches, 1.11, vec![]);
@@ -603,12 +704,13 @@ mod tests {
     fn a_finger_that_moves_past_the_slop_drags_from_where_it_came_down() {
         let mut touches = Touches::default();
         let down = at(300.0, 400.0);
-        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        frame(&mut touches, 0.9, vec![finger(1, TouchPhase::Start, down)]);
         let past = at(300.0 + SLOP + 1.0, 400.0);
         let further = at(330.0, 400.0);
-        // The press has the frame to itself, however far the finger goes in it.
+        // The press has the frame to itself, however far the finger goes in it: the frame ends
+        // with the pointer back where the finger came down, pressed.
         let (heard, seen) = frame(&mut touches, 1.02, vec![finger(1, TouchPhase::Move, past), finger(1, TouchPhase::Move, further)]);
-        assert_eq!(seen, vec![Event::PointerMoved(down), button(down, true)]);
+        assert_eq!(seen, vec![Event::PointerMoved(past), Event::PointerMoved(further), Event::PointerMoved(down), button(down, true)]);
         assert_eq!(heard.drag, Some(down));
         assert_eq!(heard.wake, Some(0.0), "the way to the finger is the next frame's");
         // The next frame goes to the finger, with or without input, and is still the drag's.
@@ -631,7 +733,61 @@ mod tests {
         let (heard, seen) = frame(&mut touches, 1.06, vec![]);
         assert_eq!(seen, vec![Event::PointerGone]);
         assert!(heard.drag.is_none() && !heard.fingers);
-        assert!(touches.readout().iter().any(|line| line.contains("one finger dragged")), "{:?}", touches.readout());
+        assert!(touches.readout().iter().any(|line| line.contains("one finger dragged 122 pt from 300, 400 in 0.03 s")), "{:?}", touches.readout());
+    }
+
+    #[test]
+    fn a_finger_begins_no_drag_in_its_first_moments_however_far_it_goes() {
+        let mut touches = Touches::default();
+        let (down, far) = (at(300.0, 400.0), at(340.0, 400.0));
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        let (heard, seen) = frame(&mut touches, 1.03, vec![finger(1, TouchPhase::Move, far)]);
+        assert_eq!(seen, vec![Event::PointerMoved(far)], "the pointer follows it, unpressed");
+        assert!(heard.fingers && heard.drag.is_none());
+        assert!(heard.wake.is_some_and(|wake| (wake - (SETTLE - 0.03)).abs() < 1e-9), "it asks to be looked at when they are over: {:?}", heard.wake);
+        // Looked at too early: still nothing, and the rest of the wait.
+        let (heard, seen) = frame(&mut touches, 1.05, vec![]);
+        assert!(seen.is_empty() && heard.drag.is_none(), "{seen:?}");
+        assert!(heard.wake.is_some_and(|wake| (wake - (SETTLE - 0.05)).abs() < 1e-9), "{:?}", heard.wake);
+        // The moments are over: the press where it came down, the way to the finger a frame on.
+        let (heard, seen) = frame(&mut touches, 1.0 + SETTLE + 0.001, vec![]);
+        assert_eq!(seen, vec![Event::PointerMoved(down), button(down, true)]);
+        assert_eq!((heard.drag, heard.wake), (Some(down), Some(0.0)));
+        let (heard, seen) = frame(&mut touches, 1.08, vec![]);
+        assert_eq!(seen, vec![Event::PointerMoved(far)]);
+        assert_eq!(heard.drag, Some(down));
+
+        // One that is back within the slop by then drags nothing, and its lift is a tap.
+        let mut touches = Touches::default();
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        frame(&mut touches, 1.02, vec![finger(1, TouchPhase::Move, far)]);
+        frame(&mut touches, 1.04, vec![finger(1, TouchPhase::Move, at(302.0, 400.0))]);
+        let (heard, seen) = frame(&mut touches, 1.2, vec![]);
+        assert!(seen.is_empty() && heard.drag.is_none() && heard.wake.is_none(), "{seen:?}");
+        let (_, seen) = frame(&mut touches, 1.3, vec![finger(1, TouchPhase::End, at(302.0, 400.0))]);
+        assert_eq!(seen, vec![Event::PointerMoved(down), button(down, true)]);
+    }
+
+    #[test]
+    fn a_finger_that_goes_far_and_lifts_before_a_drag_began_does_nothing() {
+        let (down, far) = (at(300.0, 400.0), at(400.0, 400.0));
+        // In its first moments.
+        let mut touches = Touches::default();
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        frame(&mut touches, 1.03, vec![finger(1, TouchPhase::Move, far)]);
+        let (heard, seen) = frame(&mut touches, 1.05, vec![finger(1, TouchPhase::End, far)]);
+        assert_eq!(seen, vec![Event::PointerGone]);
+        assert!(heard.drag.is_none() && heard.wake.is_none());
+        assert_eq!(heard.notes, vec!["finger lifted 100 pt away after 0.05 s, before a drag began: nothing done".to_owned()]);
+        let (_, seen) = frame(&mut touches, 1.2, vec![]);
+        assert!(seen.is_empty(), "nothing is owed: {seen:?}");
+        // Later, but all of it in one frame's input.
+        let mut touches = Touches::default();
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        let (heard, seen) = frame(&mut touches, 1.5, vec![finger(1, TouchPhase::Move, far), finger(1, TouchPhase::End, far)]);
+        assert_eq!(seen, vec![Event::PointerMoved(far), Event::PointerGone]);
+        assert!(heard.drag.is_none());
+        assert_eq!(touches.mode, Mode::Idle);
     }
 
     #[test]
@@ -687,17 +843,82 @@ mod tests {
         let mut touches = Touches::default();
         let down = at(300.0, 400.0);
         let far = at(360.0, 400.0);
-        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
-        frame(&mut touches, 1.02, vec![finger(1, TouchPhase::Move, far)]);
-        frame(&mut touches, 1.03, vec![]);
+        frame(&mut touches, 0.4, vec![finger(1, TouchPhase::Start, down)]);
+        frame(&mut touches, 0.5, vec![finger(1, TouchPhase::Move, far)]);
+        frame(&mut touches, 0.51, vec![]);
         let second = at(460.0, 400.0);
         let (heard, seen) = frame(&mut touches, 1.04, vec![finger(2, TouchPhase::Start, second)]);
         assert_eq!(seen, vec![button(far, false), Event::PointerMoved(at(410.0, 400.0)), wheel(TouchPhase::Start, Vec2::ZERO)]);
         assert!(far.distance(down) > 6.0, "further than a click may move");
         assert_eq!(heard.drag, Some(down), "the release's frame is still the drag's");
+        assert!(!heard.taken_back, "a drag as old as this one was meant");
+        assert_eq!(heard.notes, vec!["one finger dragged 60 pt in 0.54 s, then a second came down".to_owned()]);
         let (heard, _) = frame(&mut touches, 1.05, vec![]);
         assert!(heard.drag.is_none());
         assert!(heard.fingers);
+    }
+
+    #[test]
+    fn a_second_finger_in_the_first_ones_first_moments_finds_no_drag_to_end() {
+        let (a, on, b) = (at(400.0, 500.0), at(420.0, 500.0), at(540.0, 500.0));
+        let mut touches = Touches::default();
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, a)]);
+        frame(&mut touches, 1.03, vec![finger(1, TouchPhase::Move, on)]);
+        let (heard, seen) = frame(&mut touches, 1.05, vec![finger(2, TouchPhase::Start, b)]);
+        assert_eq!(seen, vec![Event::PointerMoved(between(on, b)), wheel(TouchPhase::Start, Vec2::ZERO)]);
+        assert!(heard.drag.is_none() && !heard.taken_back && heard.wake.is_none());
+        assert_eq!(heard.notes, vec!["a second finger came down 0.05 s after the first, which had moved 20 pt".to_owned()]);
+        assert!(touches.readout().iter().all(|line| !line.contains("second finger")), "the log's alone: {:?}", touches.readout());
+        // The two then scroll from where they are, the first finger's head start not counted.
+        let (_, seen) = frame(&mut touches, 1.07, vec![finger(1, TouchPhase::Move, at(430.0, 510.0)), finger(2, TouchPhase::Move, at(550.0, 510.0))]);
+        assert!((scrolled(&seen).0 - vec2(10.0, 10.0)).length() < 1e-3, "{seen:?}");
+        assert_eq!(pressed(&seen), 0);
+
+        // Long after its first moments, but in one frame's input: the first finger's way past
+        // the slop, then the second finger. Still no drag.
+        let mut touches = Touches::default();
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, a)]);
+        let (heard, seen) = frame(&mut touches, 2.0, vec![finger(1, TouchPhase::Move, on), finger(2, TouchPhase::Start, b)]);
+        assert_eq!(seen, vec![Event::PointerMoved(on), Event::PointerMoved(between(on, b)), wheel(TouchPhase::Start, Vec2::ZERO)]);
+        assert!(heard.drag.is_none() && !heard.taken_back);
+    }
+
+    #[test]
+    fn a_second_finger_or_the_tip_soon_after_the_first_takes_its_drag_back() {
+        let (down, far, second) = (at(300.0, 400.0), at(360.0, 400.0), at(460.0, 400.0));
+        // The first finger's drag has begun and has been shown to the app.
+        let begun = || {
+            let mut touches = Touches::default();
+            frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+            let (heard, _) = frame(&mut touches, 1.1, vec![finger(1, TouchPhase::Move, far)]);
+            assert_eq!(heard.drag, Some(down));
+            frame(&mut touches, 1.11, vec![]);
+            touches
+        };
+        let mut touches = begun();
+        let (heard, seen) = frame(&mut touches, 1.2, vec![finger(2, TouchPhase::Start, second)]);
+        assert_eq!(seen, vec![button(far, false), Event::PointerMoved(at(410.0, 400.0)), wheel(TouchPhase::Start, Vec2::ZERO)]);
+        assert!(heard.taken_back);
+        assert_eq!(heard.drag, Some(down), "the release's frame is still the drag's");
+        assert_eq!(heard.notes, vec!["one finger dragged 60 pt in 0.10 s, then a second came down: taken back".to_owned()]);
+        let (heard, _) = frame(&mut touches, 1.21, vec![]);
+        assert!(!heard.taken_back && heard.drag.is_none());
+
+        // The Pencil's tip after a hand: the same, and the frame is the tip's.
+        let mut touches = begun();
+        let nib = at(700.0, 200.0);
+        let (heard, seen) = frame(&mut touches, 1.3, vec![tip(7, TouchPhase::Start, nib)]);
+        assert_eq!(seen, vec![button(far, false), Event::PointerMoved(nib), button(nib, true)]);
+        assert!(heard.taken_back && heard.drag.is_none());
+        assert_eq!(heard.notes, vec!["one finger dragged 60 pt in 0.20 s, then the Pencil came down: taken back".to_owned()]);
+
+        // Not after JOIN, counted from the drag's beginning.
+        let mut touches = begun();
+        let (heard, _) = frame(&mut touches, 1.1 + JOIN - 0.01, vec![finger(2, TouchPhase::Start, second)]);
+        assert!(heard.taken_back);
+        let mut touches = begun();
+        let (heard, _) = frame(&mut touches, 1.1 + JOIN + 0.01, vec![finger(2, TouchPhase::Start, second)]);
+        assert!(!heard.taken_back);
     }
 
     #[test]
@@ -792,13 +1013,13 @@ mod tests {
         let mut touches = Touches::default();
         let down = at(300.0, 400.0);
         let far = at(380.0, 400.0);
-        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
-        frame(&mut touches, 1.02, vec![finger(1, TouchPhase::Move, far)]);
-        frame(&mut touches, 1.03, vec![]);
+        frame(&mut touches, 0.4, vec![finger(1, TouchPhase::Start, down)]);
+        frame(&mut touches, 0.5, vec![finger(1, TouchPhase::Move, far)]);
+        frame(&mut touches, 0.51, vec![]);
         let nib = at(700.0, 200.0);
         let (heard, seen) = frame(&mut touches, 1.04, vec![tip(7, TouchPhase::Start, nib)]);
         assert_eq!(seen, vec![button(far, false), Event::PointerMoved(nib), button(nib, true)]);
-        assert!(heard.drag.is_none() && !heard.fingers);
+        assert!(heard.drag.is_none() && !heard.fingers && !heard.taken_back);
         let (_, seen) = frame(&mut touches, 1.05, vec![finger(1, TouchPhase::Move, at(500.0, 500.0)), finger(1, TouchPhase::End, at(500.0, 500.0))]);
         assert!(seen.is_empty(), "the finger is dead: {seen:?}");
 
@@ -900,7 +1121,7 @@ mod tests {
                 ..Default::default()
             };
             let heard = touches.frame(&mut raw);
-            assert!(heard.wake.is_none_or(|wake| wake == 0.0));
+            assert!(heard.wake.is_none_or(|wake| (0.0..=SETTLE).contains(&wake)));
             for event in &raw.events {
                 match event {
                     Event::PointerButton { pressed: true, .. } => down += 1,
@@ -916,19 +1137,6 @@ mod tests {
             let _ = touches.readout();
             time += 0.01;
         }
-    }
-
-    #[test]
-    fn a_drag_lifted_in_the_frame_of_its_press_lets_go_in_that_frame() {
-        let mut touches = Touches::default();
-        let (down, far) = (at(300.0, 400.0), at(400.0, 400.0));
-        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
-        let (heard, seen) = frame(&mut touches, 1.02, vec![finger(1, TouchPhase::Move, far), finger(1, TouchPhase::End, far)]);
-        assert_eq!(seen, vec![Event::PointerMoved(down), button(down, true), Event::PointerMoved(far), button(far, false)]);
-        assert_eq!(heard.drag, Some(down));
-        let (heard, seen) = frame(&mut touches, 1.03, vec![]);
-        assert_eq!(seen, vec![Event::PointerGone]);
-        assert!(heard.drag.is_none());
     }
 
     #[test]

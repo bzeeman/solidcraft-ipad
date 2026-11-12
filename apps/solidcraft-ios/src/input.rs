@@ -9,6 +9,7 @@
 //! fingers' self-test also runs headless as a test on any platform.
 
 use egui::{Pos2, Rect};
+use solidcraft_engine::render::Camera;
 use solidcraft_ui_egui::SolveApp;
 use solidcraft_ui_egui::viewport::NavMode;
 
@@ -29,6 +30,10 @@ const TOUCH_DEMO: &str = "SOLIDCRAFT_IOS_TOUCH_DEMO";
 /// The self-test's fingers wait until the camera has stood still for this many frames: the first
 /// frames fit the model to the view.
 const SETTLED: u32 = 10;
+/// The self-test's fingers take a step no sooner than this (seconds) after the last, whatever the
+/// frame rate: a finger begins no drag in its first moments on the screen ([`touch::SETTLE`]),
+/// and at a few hundred frames a second its whole drag would fit into them.
+const DEMO_STEP: f64 = 0.015;
 
 /// Where the camera looks: what the self-test compares before and after its fingers.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -69,8 +74,9 @@ struct TouchDemo {
     frames: u32,
     still: u32,
     last: Option<Look>,
-    /// The next step of the fingers, once they have begun.
+    /// The next step of the fingers, once they have begun, and when the last one was taken.
     step: Option<u16>,
+    stepped: Option<f64>,
     /// The camera when the part now running began.
     from: Option<Look>,
     /// The parts that did not do what fingers should.
@@ -84,6 +90,9 @@ pub struct Input {
     touches: touch::Touches,
     /// A finger's drag has lit the navigation bar's Orbit mode; it goes out with the drag.
     orbit_lit: bool,
+    /// The camera as that drag found it: where the view goes back to if the drag turns out to
+    /// be the first of two fingers ([`touch::Heard::taken_back`]).
+    before: Option<Camera>,
     /// See [`DEMO`]: the frames its input has been given for, while it runs.
     demo: Option<u32>,
     /// See [`TOUCH_DEMO`], while it runs.
@@ -121,7 +130,7 @@ impl Input {
         for note in &touched.notes {
             log::info!(target: "solidcraft_ios", "touch: {note}");
         }
-        self.finger_drag(app, touched.drag);
+        self.finger_drag(app, touched.drag, touched.taken_back);
         self.pencil.fingers(touched.fingers);
         self.demo_input(content, raw);
         let ring = self.pencil.ring().is_some();
@@ -150,13 +159,23 @@ impl Input {
     /// still press, the panels and the Pencil alone: so a finger's drag that began over the view
     /// lights that mode, and it goes out the frame after the finger lifts (the release's frame is
     /// still the drag's, or its end would select). A mode the user lit stays theirs.
-    fn finger_drag(&mut self, app: &mut SolveApp, drag: Option<Pos2>) {
+    ///
+    /// A drag `taken_back` was no drag: the first of two fingers that came down one after the
+    /// other, already on its way. The view goes back to where that drag found it, before the
+    /// app reads the frame in which the two fingers begin.
+    fn finger_drag(&mut self, app: &mut SolveApp, drag: Option<Pos2>, taken_back: bool) {
+        if taken_back && let Some(before) = self.before.take() {
+            app.cam = before;
+            // The turn the camera code keeps for itself between a drag's frames.
+            app.viewport.orbit_free = None;
+        }
         match (drag, self.orbit_lit) {
             (Some(origin), false) => {
                 let over_view = app.viewport.rect.is_none_or(|view| view.contains(origin));
                 if over_view && app.viewport.nav.is_none() {
                     app.viewport.nav = Some(NavMode::Orbit);
                     self.orbit_lit = true;
+                    self.before = Some(app.cam);
                 }
             }
             (None, true) => {
@@ -164,6 +183,7 @@ impl Input {
                     app.viewport.nav = None;
                 }
                 self.orbit_lit = false;
+                self.before = None;
             }
             _ => {}
         }
@@ -201,6 +221,12 @@ impl Input {
         let Some(view) = app.viewport.rect else {
             return;
         };
+        let now = raw.time.filter(|time| time.is_finite());
+        if let (Some(now), Some(stepped)) = (now, demo.stepped)
+            && (0.0..DEMO_STEP).contains(&(now - stepped))
+        {
+            return;
+        }
         let look = Look::of(app);
         let mut lines = Vec::new();
         let step = match demo.step {
@@ -261,6 +287,7 @@ impl Input {
             Some(events) => {
                 raw.events.extend(events);
                 demo.step = Some(step + 1);
+                demo.stepped = now;
             }
             None => {
                 lines.push(if demo.failed.is_empty() {
@@ -344,6 +371,80 @@ mod tests {
         }
         assert_eq!(h.app.session.selection.len(), 1, "{:?}", h.app.session.selection);
         assert!(h.ctx.input(|i| i.pointer.latest_pos().is_none()), "the pointer has left the screen with the tip");
+    }
+
+    /// A finger as the window layer reports it.
+    fn finger(id: u64, phase: TouchPhase, at: Pos2) -> Event {
+        Event::Touch { device_id: TouchDeviceId(0), id: TouchId(id), phase, pos: at, force: None }
+    }
+
+    /// The fault the iPad's log showed in 3 of Ben's first 10 two-finger gestures: the first
+    /// finger down a moment before the second, and already moving. The view turned before it
+    /// was carried.
+    #[test]
+    fn two_fingers_that_land_one_after_the_other_carry_the_model_and_do_not_turn_it() {
+        // The frames between the two fingers: 0.05 s, inside the first one's first moments; and
+        // 0.15 s, by when the first has begun to turn the view.
+        for lead in [3_u16, 9] {
+            let mut h = sample();
+            let mut input = Input::default();
+            let mut time = 10.0;
+            let view = h.app.viewport.rect.unwrap();
+            let from = Look::of(&h.app);
+            let step = vec2(6.0, 3.0);
+            let (a, b) = (view.center() - vec2(60.0, 0.0), view.center() + vec2(60.0, 0.0));
+            frame(&mut h, &mut input, &mut time, vec![finger(1, TouchPhase::Start, a)]);
+            let mut turned = 0.0_f64;
+            for n in 1..lead {
+                frame(&mut h, &mut input, &mut time, vec![finger(1, TouchPhase::Move, a + step * f32::from(n))]);
+                turned = turned.max(Look::of(&h.app).turned(from));
+            }
+            assert_eq!(turned > 0.05, lead == 9, "lead {lead}: turned {turned} before the second finger");
+            // The second finger lands, and the view is where the first one found it.
+            let a = a + step * f32::from(lead - 1);
+            frame(&mut h, &mut input, &mut time, vec![finger(2, TouchPhase::Start, b)]);
+            let joined = Look::of(&h.app);
+            assert!(joined.turned(from) < 1e-9 && joined.carried(from) < 1e-9, "lead {lead}: {joined:?} from {from:?}");
+            // Both go on together, and lift.
+            for n in 1..=10_u16 {
+                let on = step * f32::from(n);
+                frame(&mut h, &mut input, &mut time, vec![finger(1, TouchPhase::Move, a + on), finger(2, TouchPhase::Move, b + on)]);
+            }
+            let (a, b) = (a + step * 10.0, b + step * 10.0);
+            frame(&mut h, &mut input, &mut time, vec![finger(1, TouchPhase::End, a)]);
+            frame(&mut h, &mut input, &mut time, vec![finger(2, TouchPhase::End, b)]);
+            for _ in 0..3 {
+                frame(&mut h, &mut input, &mut time, Vec::new());
+            }
+            let look = Look::of(&h.app);
+            let expected = f64::from((step * 10.0).length()) * 2.0 * from.half_height / f64::from(view.height());
+            assert!(look.turned(from) < 1e-9, "lead {lead}: turned {}", look.turned(from));
+            assert!((look.carried(from) - expected).abs() <= expected * 0.02, "lead {lead}: carried {} of {expected}", look.carried(from));
+            assert!((look.zoomed(from) - 1.0).abs() < 1e-6, "lead {lead}: zoomed {}", look.zoomed(from));
+            assert_eq!(h.app.viewport.nav, None, "lead {lead}");
+            assert!(h.app.session.selection.is_empty(), "lead {lead}: {:?}", h.app.session.selection);
+        }
+    }
+
+    #[test]
+    fn a_second_finger_long_after_the_first_leaves_the_turn_the_first_one_made() {
+        let mut h = sample();
+        let mut input = Input::default();
+        let mut time = 10.0;
+        let view = h.app.viewport.rect.unwrap();
+        let from = Look::of(&h.app);
+        let a = view.center() - vec2(60.0, 0.0);
+        frame(&mut h, &mut input, &mut time, vec![finger(1, TouchPhase::Start, a)]);
+        // Two thirds of a second of turning: longer than a second finger may be late by.
+        for n in 1..=40_u16 {
+            frame(&mut h, &mut input, &mut time, vec![finger(1, TouchPhase::Move, a + vec2(3.0, 0.0) * f32::from(n))]);
+        }
+        let turned = Look::of(&h.app).turned(from);
+        assert!(turned > 0.2, "{turned}");
+        frame(&mut h, &mut input, &mut time, vec![finger(2, TouchPhase::Start, view.center() + vec2(100.0, 0.0))]);
+        frame(&mut h, &mut input, &mut time, Vec::new());
+        assert!((Look::of(&h.app).turned(from) - turned).abs() < 1e-9, "the turn was meant and stays");
+        assert_eq!(h.app.viewport.nav, None);
     }
 
     #[test]
