@@ -1,0 +1,31 @@
+[warn eframe::native::file_storage] Saving disabled: Failed to find path to data_dir.
+[warn wgpu_core::instance] Missing downlevel flags: DownlevelFlags(INDIRECT_EXECUTION | BASE_VERTEX | CUBE_ARRAY_TEXTURES | COMPARISON_SAMPLERS)
+The underlying API or device in use does not support enough features to be a fully compliant implementation of WebGPU. A subset of the features can still be used. If you are running this program on native and not in a browser and wish to limit the features you use to the supported subset, call Adapter::downlevel_properties or Device::downlevel_properties to get a listing of the features the current platform supports.
+[warn wgpu_core::instance] DownlevelCapabilities {
+    flags: DownlevelFlags(
+        COMPUTE_SHADERS | FRAGMENT_WRITABLE_STORAGE | READ_ONLY_DEPTH_STENCIL | NON_POWER_OF_TWO_MIPMAPPED_TEXTURES | INDEPENDENT_BLEND | VERTEX_STORAGE | ANISOTROPIC_FILTERING | FRAGMENT_STORAGE | MULTISAMPLED_SHADING | DEPTH_TEXTURE_AND_BUFFER_COPIES | WEBGPU_TEXTURE_FORMAT_SUPPORT | BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED | UNRESTRICTED_INDEX_BUFFER | FULL_DRAW_INDEX_UINT32 | DEPTH_BIAS_CLAMP | VIEW_FORMATS | UNRESTRICTED_EXTERNAL_TEXTURE_COPIES | SURFACE_VIEW_FORMATS | NONBLOCKING_QUERY_RESOLVE | SHADER_F16_IN_F32 | MSL2_1 | TEXTURE_COMPRESSION,
+    ),
+    limits: DownlevelLimits,
+    shader_model: Sm5,
+}
+[info solidcraft_ios] window and device ready
+[info solidcraft_ios] graphics: Metal Apple iOS simulator GPU (), MSAA 4x
+[info solidcraft_ios] graphics: the device is below WebGPU's baseline, without DownlevelFlags(INDIRECT_EXECUTION | BASE_VERTEX | CUBE_ARRAY_TEXTURES | COMPARISON_SAMPLERS)
+[info solidcraft_ios] app created
+[info solidcraft_ios] self-tests: SOLIDCRAFT_IOS_PENCIL_DEMO=Some("ring"), SOLIDCRAFT_IOS_TOUCH_DEMO=Some("camera"): the fingers' self-test runs, then the Pencil's
+[info solidcraft_ios] frame 1 begins
+SolidCraft graphics: GPU tessellation ready; bodies are evaluated on the GPU from now on
+[info solidcraft_ios] frame 2 begins
+[info solidcraft_ios] touch demo: fingers come down on a view of 1032 x 1285 pt, after 30 frames
+[info solidcraft_ios] touch: finger tap at 516, 708 after 0.03 s
+[info solidcraft_ios] touch demo: tap: carried 0.000, turned 0.000 rad, zoom x1.000, 1 selected: as expected (it should select what is under it and leave the camera)
+[info solidcraft_ios] touch: a second finger came down 0.02 s after the first, which had moved 0 pt
+[info solidcraft_ios] touch: two fingers moved 60, 30 pt and zoomed x1.00 from 516, 708 in 0.18 s
+[info solidcraft_ios] touch demo: two fingers carrying: carried 8.167, turned 0.000 rad, zoom x1.000, 1 selected: as expected (the model should be carried 8.167 and nothing else)
+[info solidcraft_ios] touch: a second finger came down 0.02 s after the first, which had moved 0 pt
+[info solidcraft_ios] touch: two fingers moved 0, 0 pt and zoomed x2.00 from 516, 708 in 0.18 s
+[info solidcraft_ios] touch demo: two fingers spreading: carried 10.454, turned 0.000 rad, zoom x2.000, 1 selected: as expected (the zoom should be x2.00, with no turn)
+[info solidcraft_ios] touch: one finger dragged 120 pt from 516, 748 in 0.10 s
+[info solidcraft_ios] touch demo: one finger dragging: carried 0.000, turned 0.773 rad, zoom x1.000, 1 selected: as expected (the view should turn, with no zoom)
+[info solidcraft_ios] touch demo: the camera moved as expected
+[info solidcraft_ios] pencil: the ring of keys is open
