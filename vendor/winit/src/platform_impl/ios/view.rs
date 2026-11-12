@@ -389,6 +389,23 @@ declare_class!(
     }
 );
 
+/// SolidCraft: the key that a character from the on-screen keyboard stands for. Return and Tab
+/// arrive through `insertText:` as the characters they would insert. Reported as character keys
+/// they are nothing to an app: egui-winit knows no key by that name and takes a control
+/// character for no text, so Return in a text field did nothing at all. They are the Enter and
+/// Tab keys, as the other backends report them. (Backspace has its own way in,
+/// `deleteBackward`.)
+fn soft_key(c: char, text: &smol_str::SmolStr) -> (Key, PhysicalKey) {
+    match c {
+        '\n' | '\r' => (Key::Named(NamedKey::Enter), PhysicalKey::Code(KeyCode::Enter)),
+        '\t' => (Key::Named(NamedKey::Tab), PhysicalKey::Code(KeyCode::Tab)),
+        _ => (
+            Key::Character(text.clone()),
+            PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
+        ),
+    }
+}
+
 impl WinitView {
     pub(crate) fn new(
         mtm: MainThreadMarker,
@@ -714,6 +731,8 @@ impl WinitView {
             mtm,
             text.to_string().chars().flat_map(|c| {
                 let text = smol_str::SmolStr::from_iter([c]);
+                // SolidCraft: see `soft_key`.
+                let (logical_key, physical_key) = soft_key(c, &text);
                 // Emit both press and release events
                 [ElementState::Pressed, ElementState::Released].map(|state| {
                     EventWrapper::StaticEvent(Event::WindowEvent {
@@ -728,10 +747,8 @@ impl WinitView {
                                 state,
                                 location: KeyLocation::Standard,
                                 repeat: false,
-                                logical_key: Key::Character(text.clone()),
-                                physical_key: PhysicalKey::Unidentified(
-                                    NativeKeyCode::Unidentified,
-                                ),
+                                logical_key: logical_key.clone(),
+                                physical_key,
                                 platform_specific: KeyEventExtra {},
                             },
                             is_synthetic: false,
