@@ -176,6 +176,35 @@ fn unsupported_modified_face_offers_explicit_fixed_plane_without_live_links() {
     assert_eq!(h.app.session.undo.len(), undo + 1);
 }
 
+#[test]
+fn unsupported_face_parallel_to_an_origin_plane_offers_an_offset_plane_that_stays_parametric() {
+    let mut h = Harness::new();
+    h.app.set_origin_shown(false);
+    h.app.run("solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Modified"})).unwrap();
+    h.app.run("solid.split_face", json!({"body":"Modified","faces":[[5,5,10]],"plane":{"origin":[5,0,0],"normal":[1,0,0]}})).unwrap();
+    let undo = h.app.session.undo.len();
+    h.call("ui.view", json!({"view":"top"}));
+    h.call("ui.view", json!({"view":"fit"}));
+    h.settle();
+    h.step(&json!({"start":"sketch.create"})).unwrap();
+    h.step(&json!({"click":{"world":[2.5,5,10]}})).unwrap();
+    assert!(h.app.dialog.as_ref().unwrap().error.is_some());
+    h.frames(4);
+    assert!(h.widget("Use fixed plane").is_some(), "the frozen fallback stays available");
+    h.step(&json!({"widget":"Offset plane from XY at 10 mm"})).unwrap();
+    let sketch = h.app.session.active_sketch.expect("the offset plane choice opens a sketch");
+    let FeatureKind::Sketch { plane: PlaneRef::Construction { feature }, .. } = &h.app.session.doc.feature(sketch).unwrap().kind else {
+        panic!("the sketch must sit on the new construction plane, not a fixed one");
+    };
+    let FeatureKind::ConstructionPlane { plane: PlaneRef::Offset { base, distance } } = &h.app.session.doc.feature(feature.0).unwrap().kind else {
+        panic!("the plane must be an Offset Plane");
+    };
+    assert!(matches!(base.as_ref(), PlaneRef::Origin { name } if name == "XY"));
+    assert_eq!(distance, "10 mm");
+    // Two undo steps: the plane, then the sketch on it.
+    assert_eq!(h.app.session.undo.len(), undo + 2);
+}
+
 fn occurrence_click(h: &mut Harness, path: &[u64], control: &str) {
     h.step(&json!({"click":{"occurrence":path,"control":control}})).unwrap();
 }

@@ -4063,6 +4063,29 @@ pub fn show(app: &mut SolveApp, ctx: &egui::Context) {
             Err(error) => d.refuse(app, error),
         }
     }
+    // An Offset Plane from the origin for a face that can't keep an attachment: the plane, then
+    // the sketch on it. The distance stays editable on the plane and it never loses its base.
+    if matches!(d.kind, Kind::Sketch)
+        && let Some(offset) = d.extra.remove("offset_plane")
+    {
+        let before = app.settled_cam();
+        let made = app.run("construct.plane.offset", offset).and_then(|plane| {
+            let id = plane["feature"].as_u64().ok_or_else(|| "the new plane has no feature id".to_string())?;
+            let mut params = json!({"plane": id});
+            if app.preferences.sketch_face_activates_part {
+                params["activate_part"] = json!(true);
+            }
+            app.run("sketch.create", params)
+        });
+        match made {
+            Ok(_) => {
+                app.look_at_opened_sketch(before);
+                cancel = true;
+                then_start = d.then_start;
+            }
+            Err(error) => d.refuse(app, error),
+        }
+    }
     if matches!(d.kind, Kind::Sketch)
         && !cancel
         && d.error.is_none()

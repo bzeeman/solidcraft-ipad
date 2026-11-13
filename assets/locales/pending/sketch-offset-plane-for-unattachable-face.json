@@ -1,0 +1,34 @@
+{
+  "en": {
+    "sketch.attach.offset_hint": "This face can't keep an attachment. Sketch on an offset plane from the origin instead: it never loses its reference, and its distance stays editable. A fixed plane won't follow later changes.",
+    "sketch.attach.use_offset_plane": "Offset plane from {plane} at {distance}"
+  },
+  "ar": {
+    "sketch.attach.offset_hint": "لا يمكن لهذا الوجه الاحتفاظ بالارتباط. ارسم بدلاً من ذلك على مستوى مُزاح عن نقطة الأصل: لا يفقد مرجعه أبداً، وتبقى مسافته قابلة للتعديل. المستوى الثابت لن يتبع التغييرات اللاحقة.",
+    "sketch.attach.use_offset_plane": "مستوى مُزاح عن {plane} بمسافة {distance}"
+  },
+  "de": {
+    "sketch.attach.offset_hint": "Diese Fläche kann keine Verknüpfung halten. Skizzieren Sie stattdessen auf einer versetzten Ebene vom Ursprung: Sie verliert nie ihre Referenz, und ihr Abstand bleibt bearbeitbar. Eine feste Ebene folgt späteren Änderungen nicht.",
+    "sketch.attach.use_offset_plane": "Versetzte Ebene von {plane} bei {distance}"
+  },
+  "he": {
+    "sketch.attach.offset_hint": "פאה זו אינה יכולה לשמור על הצמדה. שרטטו במקום זאת על מישור מוסט מהראשית: הוא לעולם אינו מאבד את הייחוס שלו, והמרחק שלו נשאר ניתן לעריכה. מישור קבוע לא יעקוב אחר שינויים מאוחרים יותר.",
+    "sketch.attach.use_offset_plane": "מישור מוסט מ-{plane} במרחק {distance}"
+  },
+  "ja": {
+    "sketch.attach.offset_hint": "この面はアタッチを保持できません。代わりに原点からのオフセット平面にスケッチしてください。参照を失うことはなく、距離は後から編集できます。固定平面は後の変更に追従しません。",
+    "sketch.attach.use_offset_plane": "{plane} から {distance} のオフセット平面"
+  },
+  "ko": {
+    "sketch.attach.offset_hint": "이 면은 연결을 유지할 수 없습니다. 대신 원점에서 간격띄우기한 평면에 스케치하세요. 참조를 잃지 않으며 거리를 계속 편집할 수 있습니다. 고정 평면은 이후 변경을 따르지 않습니다.",
+    "sketch.attach.use_offset_plane": "{plane}에서 {distance} 간격띄우기 평면"
+  },
+  "vi": {
+    "sketch.attach.offset_hint": "Mặt này không thể giữ liên kết. Hãy phác thảo trên một mặt phẳng dời từ gốc tọa độ: nó không bao giờ mất tham chiếu và khoảng cách vẫn chỉnh sửa được. Mặt phẳng cố định sẽ không theo các thay đổi sau này.",
+    "sketch.attach.use_offset_plane": "Mặt phẳng dời từ {plane} tại {distance}"
+  },
+  "zh": {
+    "sketch.attach.offset_hint": "此面无法保持附着。请改为在相对原点的偏移平面上绘制草图：它永远不会丢失参考，且距离仍可编辑。固定平面不会跟随之后的更改。",
+    "sketch.attach.use_offset_plane": "距 {plane} {distance} 的偏移平面"
+  }
+}

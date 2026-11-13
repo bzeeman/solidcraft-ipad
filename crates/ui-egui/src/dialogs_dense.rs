@@ -397,12 +397,27 @@ pub(super) fn rows(app: &mut SolveApp, ctx: &egui::Context, d: &mut Dialog, ui: 
         Kind::ViewNavigator(form) => crate::view_gizmo::rows(app, ui, form, &d.inputs),
         Kind::InsertDrawing(p) => crate::dialogs_insert_drawing::rows(ui, p),
         Kind::Sketch => {
-            if d.error.is_some() && matches!(d.inputs.first().and_then(|i| i.items.first()), Some(Sel::Face { .. })) {
+            if d.error.is_some()
+                && let Some(face @ Sel::Face { .. }) = d.inputs.first().and_then(|i| i.items.first())
+            {
+                // A face parallel to an origin plane: offer an Offset Plane from it first, the
+                // choice that keeps the design parametric; a fixed plane is the frozen fallback.
+                let offset = crate::sketch_attachment_ui::origin_offset(app, face);
                 ui_kit::text(
                     ui,
-                    tr("This face cannot provide a durable attachment. Choose another face or explicitly use a fixed plane."),
+                    tr(if offset.is_some() {
+                        "sketch.attach.offset_hint"
+                    } else {
+                        "This face cannot provide a durable attachment. Choose another face or explicitly use a fixed plane."
+                    }),
                     ui_kit::Text::Hint("attachment"),
                 );
+                if let Some((base, distance)) = offset {
+                    let label = crate::i18n::format("sketch.attach.use_offset_plane", &[("plane", base), ("distance", &distance)]);
+                    if ui_kit::button(ui, label.as_str(), ui_kit::Button::Normal).clicked() {
+                        d.extra.insert("offset_plane".into(), json!({"base": base, "offset": distance}));
+                    }
+                }
                 if ui_kit::button(ui, tr("Use fixed plane"), ui_kit::Button::Normal).clicked() {
                     d.extra.insert("fixed_plane".into(), json!(true));
                 }

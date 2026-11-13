@@ -102,6 +102,28 @@ pub fn face_plane(app: &SolveApp, selection: &Sel) -> Option<Value> {
     }
 }
 
+/// For a planar face that can't keep an attachment: the origin plane it is parallel to and its
+/// distance along that plane's normal, so a new sketch can sit on an Offset Plane from the origin,
+/// which never loses its reference and whose distance stays editable, instead of a frozen fixed
+/// plane. `None` when the face is tilted to all three origin planes.
+pub fn origin_offset(app: &SolveApp, selection: &Sel) -> Option<(&'static str, String)> {
+    let Sel::Face { body, index, .. } = selection else { return None };
+    let (centroid, normal) = crate::dialogs::planar_face(&app.session, body, *index)?;
+    ["XY", "YZ", "XZ"].into_iter().find_map(|name| {
+        let base = Plane::named(name)?;
+        let along = base.normal();
+        if normal.dot(along).abs() < 1.0 - 1e-9 {
+            return None;
+        }
+        let distance = (centroid - base.origin).dot(along);
+        // Six decimals of a millimetre, trailing zeros dropped; -0 reads as 0.
+        let text = format!("{distance:.6}");
+        let text = text.trim_end_matches('0').trim_end_matches('.');
+        let text = if text == "-0" { "0" } else { text };
+        Some((name, format!("{text} mm")))
+    })
+}
+
 /// What a sketch's plane is, for the Redefine Sketch Plane panel: `XY`, a construction plane's
 /// name, or the plane it's offset from, turned from or flipped from (#5103).
 pub(crate) fn plane_description(doc: &solidcraft_engine::doc::Document, plane: &PlaneRef) -> String {
