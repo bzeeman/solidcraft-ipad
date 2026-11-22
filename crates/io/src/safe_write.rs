@@ -185,11 +185,32 @@ fn open_to_flush(path: &Path) -> std::io::Result<fs::File> {
     OpenOptions::new().read(true).write(cfg!(windows)).open(path)
 }
 
+/// Whether a save whose temporary file was refused writes into the file itself instead. Only on
+/// iPadOS, and only for a file that is there: a file chosen in the system's document picker
+/// (iCloud Drive, another app's folder) comes with leave to change that one file, not to create
+/// files beside it, so the temporary file is refused while the file itself can still be written.
+fn writes_in_place(refused: std::io::ErrorKind, ios: bool, target_is_file: bool) -> bool {
+    ios && target_is_file && refused == std::io::ErrorKind::PermissionDenied
+}
+
+/// Write `bytes` into the file at `path` itself, replacing what it held. Not atomic: a crash in
+/// the middle leaves a torn file. Only for [`writes_in_place`], where nothing else can be done; the
+/// bytes are complete in memory before the file is opened, so that window is the write itself.
+fn write_in_place(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut f = OpenOptions::new().write(true).truncate(true).open(path)?;
+    f.write_all(bytes)?;
+    flush(&f)
+}
+
 fn write_steps(path: &Path, bytes: &[u8], backup: bool, stop: Option<Step>) -> std::io::Result<()> {
     let permissions = fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.permissions());
     let tmp = temp_beside(path, "new");
     if let Err(e) = write_synced(&tmp, bytes) {
         let _ = fs::remove_file(&tmp);
+        // No backup either: it would be a file beside this one too.
+        if writes_in_place(e.kind(), cfg!(target_os = "ios"), path.is_file()) {
+            return write_in_place(path, bytes);
+        }
         return Err(e);
     }
     keep_permissions(&permissions, &tmp);
@@ -342,6 +363,28 @@ mod tests {
         let d = std::env::temp_dir().join(format!("solidcraft-safe-write-{tag}-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// iPadOS: a file chosen in the document picker may be written but nothing created beside it.
+    /// Only that refusal, on iPadOS, for a file that is there, writes into the file itself.
+    #[test]
+    fn a_refused_temporary_file_writes_in_place_only_for_an_existing_file_on_ipados() {
+        use std::io::ErrorKind::{NotFound, PermissionDenied, StorageFull};
+        assert!(writes_in_place(PermissionDenied, true, true));
+        assert!(!writes_in_place(PermissionDenied, false, true), "other systems keep the error");
+        assert!(!writes_in_place(PermissionDenied, true, false), "a new file can't be written in place");
+        assert!(!writes_in_place(StorageFull, true, true), "a full disk is no reason to drop atomicity");
+        assert!(!writes_in_place(NotFound, true, true));
+    }
+
+    #[test]
+    fn writing_in_place_replaces_all_of_a_longer_file() {
+        let d = fresh_dir("in-place");
+        let f = d.join("part.sc");
+        fs::write(&f, b"a much longer old design").unwrap();
+        write_in_place(&f, b"new").unwrap();
+        assert_eq!(fs::read(&f).unwrap(), b"new");
+        assert_eq!(fs::read_dir(&d).unwrap().count(), 1, "nothing beside it");
     }
 
     /// The time of a save with its backup, the backup linked against the backup copied (links

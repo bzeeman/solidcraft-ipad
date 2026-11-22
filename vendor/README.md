@@ -122,8 +122,8 @@ SolidCraft changes:
   would add events for them upstream. Squeeze and its hover position need iPadOS 17.5; the
   delegate's two methods are declared with the view's own methods, not in the protocol's
   block, where a build with debug assertions refuses a method the running system's protocol
-  does not have. Run on an iPad Pro with a Pencil Pro (2026-11-11); hover, double tap and
-  squeeze are not confirmed there yet.
+  does not have. Confirmed on an iPad Pro with a Pencil Pro (2026-11-11): the double tap is
+  Escape, a squeeze clicks and a held squeeze opens the ring of keys.
 - `src/platform_impl/ios/view.rs` (the iPad spike): Return and Tab on the on-screen keyboard are
   reported as the Enter and Tab keys (`soft_key`). They arrive through `insertText:` as "\n" and
   "\t" and were reported as character keys of that text, which egui-winit maps to no key and

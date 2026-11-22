@@ -15,12 +15,12 @@
 #   run that makes the same package and calls nobody. The key reaches only the steps that run
 #   that script, in a job with nothing else but GitHub's own actions, each pinned.
 #
-# Runs on pushes to the spike's branches only, and by hand.
+# Runs on pushes to the spike's branches only (and the file-access branch), and by hand.
 name: iPad spike
 
 on:
   push:
-    branches: [ios-sim-spike, ipad-pencil-spike]
+    branches: [ios-sim-spike, ipad-pencil-spike, claude/project-thread-1bvly3]
   workflow_dispatch:
 
 permissions:

@@ -2,7 +2,9 @@
 //!
 //! Runs the same [`solidcraft_ui_egui::SolveApp`] as the desktop and browser apps through eframe's
 //! native runner, which on iOS is winit's UIKit backend drawing with wgpu on Metal. It opens the
-//! sample part and nothing more: no file dialogs, no settings kept between runs.
+//! sample part first. Files come and go through the system's document picker ([`documents`]):
+//! Open, Import, Save As and Export reach iCloud Drive, On My iPad and other apps' folders, and the
+//! app's own Documents folder shows in the Files app. The settings are kept between runs.
 //!
 //! Fingers move the view and the Apple Pencil points ([`touch`]): one finger turns the model, two
 //! carry it and pinch to zoom, a finger's tap is a click, and the Pencil's tip is the mouse's left
@@ -17,6 +19,10 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 #[cfg(any(target_os = "ios", test))]
+mod bookmarks;
+#[cfg(target_os = "ios")]
+mod documents;
+#[cfg(any(target_os = "ios", test))]
 mod input;
 #[cfg(any(target_os = "ios", test))]
 mod pencil;
@@ -29,7 +35,7 @@ mod ios {
     use solidcraft_ui_egui::ui_kit::{Container, Surface};
     use solidcraft_ui_egui::{Services, SolveApp};
 
-    use crate::{input, pencil};
+    use crate::{documents, input, pencil};
 
     /// The scene's depth and stencil, as in the desktop app.
     const DEPTH_BITS: u8 = 24;
@@ -149,6 +155,10 @@ mod ios {
             if self.input.busy() || !self.app.synthetic.is_empty() {
                 ctx.request_repaint();
             }
+            // Recent designs brought back from their bookmarks; not while a picker is answering.
+            for path in if self.app.file_picker_busy() { Vec::new() } else { documents::take() } {
+                self.app.open_path_async(&path);
+            }
             self.app.logic(ctx);
         }
 
@@ -165,6 +175,15 @@ mod ios {
             ui.painter().rect_filled(above, 0.0, solidcraft_ui_egui::theme::Tokens::get().app_bar);
             ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| self.app.ui(ui));
             self.pencil_ui(ui.ctx());
+        }
+
+        /// eframe calls this every 30 seconds and when the app closes. iOS may end an app in the
+        /// background without closing it, so a change can be lost if it is younger than that.
+        fn save(&mut self, storage: &mut dyn eframe::Storage) {
+            match self.app.try_prefs() {
+                Ok(prefs) => storage.set_string(solidcraft_ui_egui::prefs::STORAGE_KEY, prefs),
+                Err(reason) => log::warn!(target: "solidcraft_ios", "settings were not written: {reason}"),
+            }
         }
     }
 
@@ -197,8 +216,10 @@ mod ios {
             depth_buffer: 0,
             stencil_buffer: 0,
             multisampling: 1,
-            // Nothing is kept between runs yet.
+            // The window is the whole screen, so only the settings are kept between runs.
             persist_window: false,
+            // eframe keeps no settings on iOS by itself (its `storage_dir` has no iOS folder).
+            persistence_path: solidcraft_engine::recovery::data_dir().map(|dir| dir.join("app.ron")),
             ..Default::default()
         };
         let result = eframe::run_native(
@@ -207,7 +228,13 @@ mod ios {
             Box::new(|cc| {
                 log::info!(target: "solidcraft_ios", "window and device ready");
                 solidcraft_ui_egui::fonts::setup_bundled_fonts(&cc.egui_ctx);
-                let mut app = SolveApp::new(Session::default(), Services::default());
+                let mut services = Services::default();
+                documents::install(&mut services, &cc.egui_ctx);
+                let mut app = SolveApp::new(Session::default(), services);
+                // The settings of the last run, before the iPad's own choices below override any.
+                if let Some(stored) = cc.storage.and_then(|s| solidcraft_ui_egui::prefs::stored(|k| s.get_string(k))) {
+                    app.load_prefs(&stored);
+                }
                 match &cc.wgpu_render_state {
                     Some(rs) => {
                         let info = rs.adapter.get_info();

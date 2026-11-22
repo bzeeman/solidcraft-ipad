@@ -33,12 +33,12 @@ pub fn default_dir() -> Option<PathBuf> {
     let env = |k: &str| std::env::var_os(k).filter(|d| !d.is_empty()).map(PathBuf::from);
     let root = if cfg!(windows) {
         env("LOCALAPPDATA")?
-    } else if cfg!(target_os = "macos") {
+    } else if APPLE {
         env("HOME")?.join("Library/Application Support")
     } else {
         env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share")))?
     };
-    let (dir, legacy) = dirs_under(&long_names(&root), cfg!(windows) || cfg!(target_os = "macos"));
+    let (dir, legacy) = dirs_under(&long_names(&root), cfg!(windows) || APPLE);
     // Compatibility shim (docs/compatibility.md): autosaves made before the rename (or, in the
     // Flatpak sandbox, under an earlier app id) are copied to the new folder on first launch; the
     // old folder is left as it was.
@@ -50,6 +50,11 @@ pub fn default_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
+/// macOS and iPadOS keep per-user data in the same place: `HOME` is the user's folder on a Mac
+/// and the app's own container on an iPad, and either has `Library/Application Support`. On an
+/// iPad the XDG fallback would put it at the container's top, outside the folders iOS backs up.
+const APPLE: bool = cfg!(any(target_os = "macos", target_os = "ios"));
+
 /// SolidCraft's per-user data folder (the recovery folder's parent unless
 /// `SOLIDCRAFT_RECOVERY_DIR` moves that): `%LOCALAPPDATA%\SolidCraft`,
 /// `~/Library/Application Support/SolidCraft`, or `$XDG_DATA_HOME/solidcraft`
@@ -58,7 +63,7 @@ pub fn data_dir() -> Option<PathBuf> {
     let env = |k: &str| std::env::var_os(k).filter(|d| !d.is_empty()).map(PathBuf::from);
     if cfg!(windows) {
         Some(env("LOCALAPPDATA")?.join("SolidCraft"))
-    } else if cfg!(target_os = "macos") {
+    } else if APPLE {
         Some(env("HOME")?.join("Library/Application Support/SolidCraft"))
     } else {
         Some(env("XDG_DATA_HOME").or_else(|| env("HOME").map(|h| h.join(".local/share")))?.join("solidcraft"))

@@ -51,6 +51,32 @@
   </array>
   <key>UILaunchScreen</key>
   <dict/>
+  <!-- The app's Documents folder shows in the Files app as On My iPad > SolidCraft, so designs
+       saved there can be found, copied in and shared without the app. -->
+  <key>UIFileSharingEnabled</key>
+  <true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key>
+  <true/>
+  <!-- The design type, as the macOS app declares it (assets/platforms/macos/Info.plist.in), so the
+       document picker knows .sc files by name. No CFBundleDocumentTypes yet: the iPad shell can't
+       take a file the Files app hands it (winit 0.30 has no application delegate on iOS), so it
+       doesn't offer to. -->
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>io.tangencylabs.solidcraft.design</string>
+      <key>UTTypeDescription</key>
+      <string>SolidCraft design</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.data</string><string>public.content</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array><string>sc</string><string>solidcraft</string><string>solvecraft</string></array>
+      </dict>
+    </dict>
+  </array>
   <key>UIApplicationSupportsIndirectInputEvents</key>
   <true/>
   <key>UISupportedInterfaceOrientations</key>
