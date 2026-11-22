@@ -672,7 +672,7 @@ pub struct ApiBackend {
 impl ApiBackend {
     pub fn start(cfg: ApiConfig, ctx: StartContext) -> Result<ApiBackend, String> {
         if cfg.key.is_some() && !super::agents::key_allowed_for(&cfg.base_url, cfg.protocol == Protocol::OpenAi && cfg.allow_insecure_http) {
-            return Err(crate::i18n::tr("ui.ai_key_needs_https").to_string());
+            return Err(solidcraft_ui_text::tr("ui.ai_key_needs_https").to_string());
         }
         // One stable session ID per chat for OpenCode Go's routing and prompt cache.
         let session_id = new_session_id();
@@ -905,6 +905,15 @@ impl Worker {
         if let Some(m) = &self.mcp {
             m.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
         }
+        self.refresh_tools()
+    }
+
+    /// Lists the tools again, so a plugin installed, enabled or removed since the last turn is
+    /// offered (or no longer offered) from the next turn on. Both lists change together.
+    fn refresh_tools(&mut self) -> Result<(), String> {
+        if self.mcp.is_none() {
+            return Ok(());
+        }
         let list = self.mcp_call("tools/list", json!({}))?;
         self.tools = match self.cfg.protocol {
             Protocol::OpenAi => openai_tools(&list),
@@ -915,6 +924,8 @@ impl Worker {
     }
 
     fn turn(&mut self, parts: Vec<PromptPart>) {
+        // A failed refresh keeps the previous listing: the turn still runs with the tools it had.
+        let _ = self.refresh_tools();
         self.history.push(user_message(self.cfg.protocol, &parts));
         let dropped = drop_old_views(&mut self.history, MAX_HISTORY_IMAGES);
         let trimmed = self.trim_history();
@@ -979,7 +990,9 @@ impl Worker {
                 } else if !self.tool_names.iter().any(|n| n == &c.name) {
                     (format!("unknown tool `{}`", c.name), true)
                 } else {
-                    match self.mcp_call("tools/call", json!({"name": c.name, "arguments": args})) {
+                    // A plugin tool goes back by its MCP name, and through the same approval
+                    // gate as every other call: the app asks before it runs.
+                    match self.mcp_call("tools/call", json!({"name": mcp_tool_name(&c.name), "arguments": args})) {
                         Ok(r) => tool_text(&r),
                         Err(e) => (e, true),
                     }
@@ -1295,7 +1308,7 @@ impl Worker {
 
 /// What the chat says when a request ran out of time: the limit, and where to raise it.
 pub fn timed_out(limit_s: u64) -> String {
-    crate::i18n::format("ui.ai_request_timed_out", &[("seconds", &limit_s.to_string())])
+    solidcraft_ui_text::format("ui.ai_request_timed_out", &[("seconds", &limit_s.to_string())])
 }
 
 /// A failed request as people read it: one that ran into the endpoint's request timeout (the
@@ -1309,10 +1322,10 @@ pub fn http_error(status: u16, body: &Value) -> String {
     let detail =
         body.pointer("/error/message").or_else(|| body.get("error")).and_then(Value::as_str).unwrap_or("").chars().take(300).collect::<String>();
     let what = match status {
-        401 | 403 => crate::i18n::tr("ui.ai_http_key"),
-        404 => crate::i18n::tr("ui.ai_http_not_found"),
-        429 => crate::i18n::tr("ui.ai_http_busy"),
-        413 => crate::i18n::tr("ui.ai_http_too_large"),
+        401 | 403 => solidcraft_ui_text::tr("ui.ai_http_key"),
+        404 => solidcraft_ui_text::tr("ui.ai_http_not_found"),
+        429 => solidcraft_ui_text::tr("ui.ai_http_busy"),
+        413 => solidcraft_ui_text::tr("ui.ai_http_too_large"),
         _ => "",
     };
     format!(
@@ -1573,8 +1586,8 @@ pub fn openai_tools(list: &Value) -> Vec<Value> {
             a.iter()
                 .take(128)
                 .filter_map(|t| {
-                    let name = t.get("name")?.as_str()?;
-                    if HIDDEN_TOOLS.contains(&name) {
+                    let name = api_tool_name(t.get("name")?.as_str()?)?;
+                    if HIDDEN_TOOLS.contains(&name.as_str()) {
                         return None;
                     }
                     let params = t.get("inputSchema").cloned().filter(Value::is_object).unwrap_or(json!({"type": "object", "properties": {}}));
@@ -1597,8 +1610,8 @@ pub fn anthropic_tools(list: &Value) -> Vec<Value> {
             a.iter()
                 .take(128)
                 .filter_map(|t| {
-                    let name = t.get("name")?.as_str()?;
-                    if HIDDEN_TOOLS.contains(&name) {
+                    let name = api_tool_name(t.get("name")?.as_str()?)?;
+                    if HIDDEN_TOOLS.contains(&name.as_str()) {
                         return None;
                     }
                     let schema = t.get("inputSchema").cloned().filter(Value::is_object).unwrap_or(json!({"type": "object", "properties": {}}));
@@ -1621,12 +1634,31 @@ fn tool_names(list: &Value) -> Vec<String> {
             a.iter()
                 .take(128)
                 .filter_map(|t| {
-                    let name = t.get("name")?.as_str()?;
-                    (!HIDDEN_TOOLS.contains(&name)).then(|| name.to_string())
+                    let name = api_tool_name(t.get("name")?.as_str()?)?;
+                    (!HIDDEN_TOOLS.contains(&name.as_str())).then_some(name)
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A tool's name as the model APIs take it (letters, digits, `_` and `-`, at most 64): a plugin
+/// tool's `<plugin>.<entry>` is offered as `<plugin>__<entry>` (plugin and entry ids never hold
+/// `_`). A name that still does not fit is not offered.
+fn api_tool_name(name: &str) -> Option<String> {
+    let api = name.replacen('.', "__", 1);
+    (!api.is_empty() && api.len() <= 64 && api.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')).then_some(api)
+}
+
+/// The MCP name of the tool the model called by its API name: `<plugin>__<entry>` is the plugin
+/// tool `<plugin>.<entry>`; any other name is the same in both.
+fn mcp_tool_name(api: &str) -> String {
+    match api.split_once("__") {
+        Some((plugin, entry)) if solidcraft_engine::plugin::valid_id(plugin) && solidcraft_engine::plugin::valid_id(entry) => {
+            format!("{plugin}.{entry}")
+        }
+        _ => api.to_string(),
+    }
 }
 
 /// `{base}/v1/{path}`, whether the user's base URL ends in `/v1` or in the endpoint root the
@@ -1643,7 +1675,7 @@ fn anthropic_headers(base_url: &str, key: Option<&str>) -> Result<Vec<(String, S
     let mut headers = vec![("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string())];
     if let Some(k) = key {
         if !super::agents::key_safe_for(base_url) {
-            return Err(crate::i18n::tr("ui.ai_key_needs_https").to_string());
+            return Err(solidcraft_ui_text::tr("ui.ai_key_needs_https").to_string());
         }
         headers.push(("x-api-key".to_string(), k.to_string()));
     }
@@ -1670,7 +1702,7 @@ pub fn anthropic_model_list(http: &HttpFn, base_url: &str, key: Option<&str>) ->
 pub fn test_anthropic_endpoint(http: &HttpFn, base_url: &str, key: Option<&str>, model: &str) -> Result<String, String> {
     let model = model.trim();
     if model.is_empty() {
-        return Err(crate::i18n::tr("ui.ai_need_model").to_string());
+        return Err(solidcraft_ui_text::tr("ui.ai_need_model").to_string());
     }
     let mut headers = anthropic_headers(base_url, key)?;
     headers.push(("Content-Type".to_string(), "application/json".to_string()));
@@ -1687,7 +1719,7 @@ pub fn test_anthropic_endpoint(http: &HttpFn, base_url: &str, key: Option<&str>,
     if status != 200 {
         return Err(http_error(status, &v));
     }
-    Ok(crate::i18n::format("ui.ai_test_answered", &[("model", model)]))
+    Ok(solidcraft_ui_text::format("ui.ai_test_answered", &[("model", model)]))
 }
 
 /// A tool call's result as text for the model, and whether it failed.
@@ -1741,7 +1773,7 @@ fn tool_title(name: &str, args: &Value) -> String {
 /// endpoint should be, say): an error, so the picker says so and asks again later.
 fn listed_models(body: &Value, name_key: &str) -> Result<Vec<(String, Option<String>)>, String> {
     let Some(entries) = body.get("data").and_then(Value::as_array) else {
-        return Err(crate::i18n::tr("ui.agent_chat_models_not_a_list").to_string());
+        return Err(solidcraft_ui_text::tr("ui.agent_chat_models_not_a_list").to_string());
     };
     Ok(entries
         .iter()
@@ -1771,7 +1803,7 @@ pub fn model_list(http: &HttpFn, base_url: &str, key: Option<&str>, allow_insecu
     let mut headers = Vec::new();
     if let Some(k) = key {
         if !super::agents::key_allowed_for(base_url, allow_insecure_http) {
-            return Err(crate::i18n::tr("ui.ai_key_needs_https").to_string());
+            return Err(solidcraft_ui_text::tr("ui.ai_key_needs_https").to_string());
         }
         headers.push(("Authorization".to_string(), format!("Bearer {k}")));
     }
@@ -1783,13 +1815,16 @@ pub fn test_endpoint(http: &HttpFn, base_url: &str, key: Option<&str>, model: &s
     let mut headers = Vec::new();
     if let Some(k) = key {
         if !super::agents::key_allowed_for(base_url, allow_insecure_http) {
-            return Err(crate::i18n::tr("ui.ai_key_needs_https").to_string());
+            return Err(solidcraft_ui_text::tr("ui.ai_key_needs_https").to_string());
         }
         headers.push(("Authorization".to_string(), format!("Bearer {k}")));
     }
     let models = model_entries(http, base_url, headers)?;
     let found = model.is_empty() || models.iter().any(|m| m.id == model);
-    Ok(crate::i18n::format(if found { "ui.ai_test_ok" } else { "ui.ai_test_no_model" }, &[("count", &models.len().to_string()), ("model", model)]))
+    Ok(solidcraft_ui_text::format(
+        if found { "ui.ai_test_ok" } else { "ui.ai_test_no_model" },
+        &[("count", &models.len().to_string()), ("model", model)],
+    ))
 }
 
 #[cfg(test)]
@@ -2642,6 +2677,7 @@ mod tests {
     /// id that could not be sent back is left out, and the list stays within its caps.
     #[test]
     fn a_listing_keeps_the_names_and_stays_within_its_caps() {
+        crate::i18n::install();
         let mut data = vec![
             json!({"id": "openai/gpt-x", "name": "OpenAI: GPT X", "description": "Long text", "supported_parameters": ["tools"]}),
             json!({"id": "same", "name": "same", "display_name": "Same One"}),
@@ -2675,7 +2711,7 @@ mod tests {
     /// picker says why and asks again later; a list with nothing in it is a list.
     #[test]
     fn an_answer_that_is_no_model_list_is_an_error() {
-        let expected = crate::i18n::tr("ui.agent_chat_models_not_a_list").to_string();
+        let expected = solidcraft_ui_text::tr("ui.agent_chat_models_not_a_list").to_string();
         let page: HttpFn = Arc::new(|_: &HttpRequest| Ok((200, b"<!doctype html><html><body>Control UI</body></html>".to_vec())));
         assert_eq!(model_list(&page, "http://localhost:18789/v1", None, false).unwrap_err(), expected);
         assert_eq!(anthropic_model_list(&page, "http://localhost:18789/v1", None).unwrap_err(), expected);
@@ -2890,6 +2926,23 @@ mod tests {
         let sent = seen.lock().unwrap();
         assert_eq!(sent.len(), 1, "the refusal is shown, not replayed with none");
         assert_eq!(sent[0]["reasoning_effort"], "max");
+    }
+
+    #[test]
+    fn plugin_tools_reach_the_model_under_api_names_and_go_back_under_their_own() {
+        let list = json!({"tools": [
+            {"name": "measure"},
+            {"name": "gears.make", "description": "Plugin tool", "inputSchema": {"type": "object"}, "plugin": {"id": "gears"}},
+            {"name": "bad name"},
+        ]});
+        assert_eq!(tool_names(&list), ["measure", "gears__make"]);
+        assert_eq!(anthropic_tools(&list)[1]["name"], "gears__make");
+        assert_eq!(openai_tools(&list)[1]["function"]["name"], "gears__make");
+        assert_eq!(mcp_tool_name("gears__make"), "gears.make");
+        assert_eq!(mcp_tool_name("measure"), "measure");
+        assert_eq!(mcp_tool_name("skill_reference"), "skill_reference");
+        let long = format!("{}.{}", "a".repeat(40), "b".repeat(40));
+        assert_eq!(api_tool_name(&long), None, "a name past 64 characters is left out, never sent");
     }
 
     #[test]
@@ -3110,6 +3163,7 @@ mod tests {
 
     #[test]
     fn the_anthropic_test_sends_one_small_message_and_checks_the_key_rule() {
+        crate::i18n::install();
         let seen = Arc::new(std::sync::Mutex::new(Vec::<HttpRequest>::new()));
         let log = seen.clone();
         let http: HttpFn = Arc::new(move |r: &HttpRequest| {

@@ -76,7 +76,7 @@ mod ios {
     impl Shell {
         /// The ring of keys while it is open, the held modifiers beside the tip, and the readout.
         fn pencil_ui(&mut self, ctx: &egui::Context) {
-            let tokens = solidcraft_ui_egui::theme::Tokens::get();
+            let tokens = solidcraft_theme::Tokens::get();
             if let Some(centre) = self.input.pencil.ring() {
                 let bounds = pencil::ring_bounds(centre);
                 let held = self.input.pencil.held();
@@ -172,7 +172,7 @@ mod ios {
             // strip above it takes the application bar's colour, as on the desktop.
             let content = ui.ctx().content_rect();
             let above = egui::Rect::from_min_max(ui.max_rect().min, egui::pos2(ui.max_rect().right(), content.top()));
-            ui.painter().rect_filled(above, 0.0, solidcraft_ui_egui::theme::Tokens::get().app_bar);
+            ui.painter().rect_filled(above, 0.0, solidcraft_theme::Tokens::get().app_bar);
             ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| self.app.ui(ui));
             self.pencil_ui(ui.ctx());
         }
@@ -267,7 +267,7 @@ mod ios {
                 app.session.undo.clear();
                 // Built straight into the session, so nothing asked for a fit: frame it at the
                 // home view as any opened design is. The fit waits for the first layout.
-                app.cam.set_view(solidcraft_engine::render::StandardView::Iso);
+                app.cam.set_view(solidcraft_viewport::StandardView::Iso);
                 app.fit_view();
                 log::info!(target: "solidcraft_ios", "app created");
                 Ok(Box::new(Shell { app, frames: 0, input: input::Input::from_env() }))

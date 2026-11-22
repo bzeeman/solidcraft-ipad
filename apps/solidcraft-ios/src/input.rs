@@ -9,7 +9,7 @@
 //! fingers' self-test also runs headless as a test on any platform.
 
 use egui::{Pos2, Rect};
-use solidcraft_engine::render::Camera;
+use solidcraft_viewport::Camera;
 use solidcraft_ui_egui::SolveApp;
 use solidcraft_ui_egui::viewport::NavMode;
 
@@ -341,7 +341,7 @@ mod tests {
     fn sample() -> Harness {
         let mut h = Harness::new();
         h.app.session.run_script(&solidcraft_engine::sample::script()).unwrap();
-        h.app.cam.set_view(solidcraft_engine::render::StandardView::Iso);
+        h.app.cam.set_view(solidcraft_viewport::StandardView::Iso);
         h.app.fit_view();
         h.app.preferences.orbit_cursor_wrap = false;
         h.frames(5);

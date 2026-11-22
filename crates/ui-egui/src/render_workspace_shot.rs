@@ -1,9 +1,10 @@
 //! Standalone Shot editor and transient frame composition. Commands own every edit.
 use super::{RenderSelection, Stage, inspector};
-use crate::{SolveApp, theme::Tokens, ui_kit};
+use crate::{SolveApp, ui_kit};
 use egui::{Rect, pos2, vec2};
 use serde_json::{Value, json};
 use solidcraft_engine::doc::render_settings::{RenderSettings, RenderSetup};
+use solidcraft_theme::Tokens;
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Frame {
@@ -163,9 +164,9 @@ pub(super) fn rename(app: &mut SolveApp, name: &str, new_name: &str) -> Result<(
 pub(super) fn duplicate(app: &mut SolveApp, name: &str) -> Result<(), String> {
     for number in 1..=32 {
         let mut prefix = name.to_string();
-        let mut destination = crate::i18n::format("render.frame_copy_name", &[("name", &prefix), ("number", &number.to_string())]);
+        let mut destination = solidcraft_ui_text::format("render.frame_copy_name", &[("name", &prefix), ("number", &number.to_string())]);
         while destination.len() > solidcraft_engine::doc::render_settings::MAX_SETUP_NAME_BYTES && prefix.pop().is_some() {
-            destination = crate::i18n::format("render.frame_copy_name", &[("name", &prefix), ("number", &number.to_string())]);
+            destination = solidcraft_ui_text::format("render.frame_copy_name", &[("name", &prefix), ("number", &number.to_string())]);
         }
         if !app.session.doc.render.setups.contains_key(&destination) {
             app.run("render.shot.duplicate", json!({"name":name,"new_name":destination,"expected_revision":app.session.revision}))?;
@@ -270,7 +271,7 @@ pub(super) fn editor(app: &mut SolveApp, ui: &mut egui::Ui, shot: &str) {
 }
 
 /// Controls save immediately; navigation alone keeps Update/Revert.
-pub(super) fn set_camera(app: &mut SolveApp, shot: &str, camera: solidcraft_engine::render::Camera) -> Result<(), String> {
+pub(super) fn set_camera(app: &mut SolveApp, shot: &str, camera: solidcraft_viewport::Camera) -> Result<(), String> {
     if !camera.is_valid() {
         return Err(app.tr("render.shot_invalid_camera").into());
     }
@@ -354,7 +355,7 @@ fn camera(app: &mut SolveApp, ui: &mut egui::Ui, shot: &str) {
 
 pub(super) fn look_at_selection(app: &mut SolveApp, shot: &str) -> Result<(), String> {
     let bounds = crate::viewport::selection_bounds(app).ok_or_else(|| app.tr("render.shot_selection_reason").to_string())?;
-    set_camera(app, shot, solidcraft_engine::render::Camera { target: bounds.center(), ..app.cam })
+    set_camera(app, shot, solidcraft_viewport::Camera { target: bounds.center(), ..app.cam })
 }
 
 /// Change only saved lens intent. Camera updates keep their explicit Update shot action.
@@ -512,6 +513,9 @@ pub(crate) fn overlay_visible(app: &SolveApp) -> bool {
 /// Actual output-camera frame, independent of inspector focus and transient guides.
 /// Retained result/compare views use their captured image dimensions separately.
 pub(crate) fn render_rect(app: &SolveApp, viewport: Rect) -> Rect {
+    if super::tiled(app) && (!app.preferences.render_legacy_image_defaults || overlay_visible(app)) {
+        return frame_rect(super::image_aspect(&app.render_workspace.view.draft), viewport).unwrap_or(viewport);
+    }
     if app.preferences.render_legacy_image_defaults {
         return preview_rect(app, viewport).unwrap_or(viewport);
     }
@@ -534,7 +538,7 @@ pub(crate) fn preview_rect(app: &SolveApp, viewport: Rect) -> Option<Rect> {
         .get(index)
         .filter(|(_, _, height, _)| *height > 0)
         .map_or(f64::from(saved.width) / f64::from(saved.height), |(_, width, height, _)| f64::from(*width) / f64::from(*height));
-    let free = crate::shell::workspace_content(app, crate::render_ui::canvas(app, viewport));
+    let free = if super::tiled(app) { viewport } else { crate::shell::workspace_content(app, crate::render_ui::canvas(app, viewport)) };
     frame_rect(aspect, free.shrink(Tokens::get().space_8))
 }
 
@@ -563,7 +567,7 @@ pub(crate) fn overlay(app: &mut SolveApp, ui: &mut egui::Ui, viewport: Rect) {
     let lens = if app.cam.fov > 0.0 {
         // Full-frame equivalent using the vertical 24 mm sensor dimension.
         let mm = 12.0 / (app.cam.fov / 2.0).tan();
-        crate::i18n::format("render.frame_lens", &[("fov", &format!("{:.0}", app.cam.fov.to_degrees())), ("mm", &format!("{mm:.0}"))])
+        solidcraft_ui_text::format("render.frame_lens", &[("fov", &format!("{:.0}", app.cam.fov.to_degrees())), ("mm", &format!("{mm:.0}"))])
     } else {
         app.tr("render.stage_orthographic").to_string()
     };
