@@ -80,7 +80,15 @@ pub struct Row {
     agent: bool,
     /// The steps of an agent's batch still to come, as (number, name): the row's tooltip.
     pub next: Vec<(usize, String)>,
+    /// Seconds since the operation came on screen, and since its count last moved: set by
+    /// [`Panel::update`]. A count that stands still (one long feature) gets a moving stripe and
+    /// the seconds, so work that is going on never looks stuck.
+    pub elapsed_s: f64,
+    pub stalled_s: f64,
 }
+
+/// How long a count may stand still before the row shows it is still working (s).
+const STALL_S: f64 = 1.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Cancel {
@@ -126,6 +134,8 @@ impl Row {
             cancel: None,
             agent: false,
             next: Vec::new(),
+            elapsed_s: 0.0,
+            stalled_s: 0.0,
         }
     }
 
@@ -166,6 +176,17 @@ impl Row {
             return Some(format!("{}%", (done.min(total) as f64 * 100.0 / total as f64).floor()));
         }
         Some(format!("{} / {total}", (done + 1).min(total)))
+    }
+}
+
+/// The text over a row's bar: its step (`3 / 12`), with the seconds it has taken once its count
+/// stands still.
+fn status_text(row: &Row, stalled: bool) -> Option<String> {
+    let seconds = (row.elapsed_s.floor() as u64).to_string();
+    match (row.status(), stalled) {
+        (Some(status), true) => Some(solidcraft_ui_text::format("operations.status_elapsed", &[("status", &status), ("seconds", &seconds)])),
+        (None, true) => Some(solidcraft_ui_text::format("operations.elapsed", &[("seconds", &seconds)])),
+        (status, false) => status,
     }
 }
 
@@ -432,6 +453,9 @@ fn record(panel: &mut Panel, key: &str, label: String, outcome: Outcome) {
 struct Shown {
     row: Row,
     gone_at: Option<f64>,
+    /// When it came on screen, and when its count last changed (ms on [`frame_ms`]'s clock).
+    started: f64,
+    moved: f64,
 }
 
 /// The panel's rows, kept from frame to frame for the fades.
@@ -464,7 +488,14 @@ impl Panel {
     pub fn update(&mut self, rows: Vec<Row>, now: f64) {
         for shown in &mut self.shown {
             match rows.iter().find(|r| r.key == shown.row.key) {
-                Some(row) => (shown.row, shown.gone_at) = (row.clone(), None),
+                Some(row) => {
+                    if row.steps != shown.row.steps {
+                        shown.moved = now;
+                    }
+                    (shown.row, shown.gone_at) = (row.clone(), None);
+                    shown.row.elapsed_s = ((now - shown.started) / 1000.0).max(0.0);
+                    shown.row.stalled_s = ((now - shown.moved) / 1000.0).max(0.0);
+                }
                 None if shown.gone_at.is_none() => {
                     shown.gone_at = Some(now);
                     // Nothing left to cancel. Done: a full bar while it fades. Failed or
@@ -499,7 +530,7 @@ impl Panel {
         }
         for row in rows {
             if !self.shown.iter().any(|s| s.row.key == row.key) {
-                self.shown.push(Shown { row, gone_at: None });
+                self.shown.push(Shown { row, gone_at: None, started: now, moved: now });
             }
         }
         // The summary row stands above the waiting rows it follows, also when one unfolds after it.
@@ -669,21 +700,30 @@ fn paint_row(ui: &egui::Ui, painter: &egui::Painter, t: &Tokens, row: &Row, alph
     // The bar between them, the step over it.
     let bar = Rect::from_min_max(pos2(r.left() + name_w, r.center().y - 7.0), pos2(x.left() - 6.0, r.center().y + 7.0));
     painter.rect_filled(bar, t.space_3, fade(t.dialog_rule));
+    let running = !row.queued && !row.waiting && !row.cancelling && row.ended.is_none();
+    // A stripe going to and fro: the work is going on, however far it is.
+    let stripe = |strength: f32| {
+        let phase = (ui.ctx().input(|i| i.time) * 0.8).fract() as f32;
+        let w = bar.width() * 0.3;
+        let left = bar.left() + (bar.width() - w) * (1.0 - (phase * 2.0 - 1.0).abs());
+        painter.rect_filled(Rect::from_min_size(pos2(left, bar.top()), vec2(w, bar.height())), t.space_3, fade(accent).gamma_multiply(strength));
+    };
+    let stalled = running && row.stalled_s >= STALL_S;
     match row.fraction() {
-        Some(f) if f > 0.0 => {
-            painter.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, bar.height())), t.space_3, fade(accent));
+        Some(f) => {
+            if f > 0.0 {
+                painter.rect_filled(Rect::from_min_size(bar.min, vec2(bar.width() * f, bar.height())), t.space_3, fade(accent));
+            }
+            // The count stands still (one long feature): the stripe over it says it is working.
+            if stalled {
+                stripe(0.5);
+            }
         }
-        Some(_) => {}
-        // Not told how far it is: a stripe going to and fro.
-        None if !row.queued && !row.waiting && !row.cancelling && row.ended.is_none() => {
-            let phase = (ui.ctx().input(|i| i.time) * 0.8).fract() as f32;
-            let w = bar.width() * 0.3;
-            let left = bar.left() + (bar.width() - w) * (1.0 - (phase * 2.0 - 1.0).abs());
-            painter.rect_filled(Rect::from_min_size(pos2(left, bar.top()), vec2(w, bar.height())), t.space_3, fade(accent));
-        }
+        // Not told how far it is.
+        None if running => stripe(1.0),
         None => {}
     }
-    if let Some(status) = row.status() {
+    if let Some(status) = status_text(row, stalled) {
         painter.text(bar.center(), Align2::CENTER_CENTER, status, FontId::monospace(t.font_small), fade(t.text));
     }
     row.cancellable() && response.clicked()
@@ -813,6 +853,29 @@ mod tests {
         assert_eq!(row("a", Some((0, 1))).status(), None, "one step: just the bar");
         assert_eq!(row("a", None).fraction(), None);
         assert_eq!(row("a", Some((5, 0))).fraction(), None, "hostile counts");
+    }
+
+    /// A count that stands still (one long feature of an open) still shows the work going on:
+    /// the row knows how long its count stood still and how long it has run, and says the seconds.
+    #[test]
+    fn a_count_standing_still_is_shown_as_work_going_on() {
+        crate::i18n::install();
+        let mut panel = Panel::default();
+        let at = |panel: &Panel| panel.rows(0.0).next().map(|(r, _)| (r.elapsed_s, r.stalled_s));
+        panel.update(vec![row("open", Some((0, 178)))], 0.0);
+        panel.update(vec![row("open", Some((0, 178)))], 41_500.0);
+        assert_eq!(at(&panel), Some((41.5, 41.5)), "stood still since it came on screen");
+        let still = panel.rows(0.0).next().map(|(r, _)| r.clone()).unwrap();
+        let text = status_text(&still, still.stalled_s >= STALL_S);
+        assert!(text.as_deref().is_some_and(|s| s.contains("1 / 178") && s.contains("41")), "{text:?}");
+        panel.update(vec![row("open", Some((3, 178)))], 42_000.0);
+        assert_eq!(at(&panel), Some((42.0, 0.0)), "the count moved: no longer standing still");
+        let moving = panel.rows(0.0).next().map(|(r, _)| r.clone()).unwrap();
+        assert_eq!(status_text(&moving, moving.stalled_s >= STALL_S).as_deref(), Some("4 / 178"));
+        // Not told how far it is: the seconds alone once it has run a while.
+        let mut unknown = row("x", None);
+        unknown.elapsed_s = 7.9;
+        assert!(status_text(&unknown, true).is_some_and(|s| s.contains('7') && !s.contains('/')));
     }
 
     /// A history command computing off the window thread shows as a row with its command's name

@@ -1,0 +1,6 @@
+{
+  "de": { "operations.elapsed": "{seconds} s", "operations.status_elapsed": "{status} · {seconds} s" },
+  "en": { "operations.elapsed": "{seconds} s", "operations.status_elapsed": "{status} · {seconds} s" },
+  "es": { "operations.elapsed": "{seconds} s", "operations.status_elapsed": "{status} · {seconds} s" },
+  "fr": { "operations.elapsed": "{seconds} s", "operations.status_elapsed": "{status} · {seconds} s" }
+}
