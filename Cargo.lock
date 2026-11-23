@@ -6343,6 +6343,7 @@ dependencies = [
  "solidcraft-theme",
  "solidcraft-ui-egui",
  "solidcraft-viewport",
+ "winit",
 ]
 
 [[package]]

@@ -155,8 +155,10 @@ mod ios {
             if self.input.busy() || !self.app.synthetic.is_empty() {
                 ctx.request_repaint();
             }
-            // Recent designs brought back from their bookmarks; not while a picker is answering.
-            for path in if self.app.file_picker_busy() { Vec::new() } else { documents::take() } {
+            // Recent designs brought back from their bookmarks, and designs tapped in Files; not
+            // while a picker is answering.
+            let waiting = if self.app.file_picker_busy() { Vec::new() } else { documents::take().into_iter().chain(documents::take_opened()).collect() };
+            for path in waiting {
                 self.app.open_path_async(&path);
             }
             self.app.logic(ctx);

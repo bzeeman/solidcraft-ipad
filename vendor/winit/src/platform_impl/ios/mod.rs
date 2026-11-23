@@ -4,6 +4,8 @@ mod app_state;
 mod event_loop;
 mod monitor;
 mod notification_center;
+// SolidCraft: the UIScene life cycle.
+mod scene;
 mod view;
 mod view_controller;
 mod window;
@@ -17,6 +19,7 @@ pub(crate) use self::event_loop::{
     PlatformSpecificEventLoopAttributes,
 };
 pub(crate) use self::monitor::{MonitorHandle, VideoModeHandle};
+pub(crate) use self::scene::take_opened_files;
 pub(crate) use self::window::{PlatformSpecificWindowAttributes, Window, WindowId};
 pub(crate) use crate::cursor::{
     NoCustomCursor as PlatformCustomCursor, NoCustomCursor as PlatformCustomCursorSource,

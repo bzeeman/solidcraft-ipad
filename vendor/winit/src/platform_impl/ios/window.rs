@@ -15,6 +15,7 @@ use objc2_ui_kit::{
 use tracing::{debug, warn};
 
 use super::app_state::EventWrapper;
+use super::scene;
 use super::view::WinitView;
 use super::view_controller::WinitViewController;
 use crate::cursor::Cursor;
@@ -80,7 +81,17 @@ impl WinitUIWindow {
         frame: CGRect,
         view_controller: &UIViewController,
     ) -> Retained<Self> {
-        let this: Retained<Self> = unsafe { msg_send_id![mtm.alloc(), initWithFrame: frame] };
+        // SolidCraft: in the app's window scene when it has one (the UIScene life cycle); a
+        // window made before the scene connects moves into it when it does.
+        let this: Retained<Self> = match scene::current(mtm) {
+            Some(scene) => unsafe { msg_send_id![mtm.alloc(), initWithWindowScene: &*scene] },
+            None => {
+                let this: Retained<Self> =
+                    unsafe { msg_send_id![mtm.alloc(), initWithFrame: frame] };
+                scene::wait_for_scene(mtm, &this);
+                this
+            },
+        };
 
         this.setRootViewController(Some(view_controller));
 
@@ -508,16 +519,21 @@ impl Window {
 
         let screen_bounds = screen.bounds();
 
-        let frame = match window_attributes.inner_size {
-            Some(dim) => {
-                let scale_factor = screen.scale();
-                let size = dim.to_logical::<f64>(scale_factor as f64);
-                CGRect {
-                    origin: screen_bounds.origin,
-                    size: CGSize { width: size.width as _, height: size.height as _ },
-                }
+        // SolidCraft: a window fills its scene, which in Split View or Stage Manager is smaller
+        // than the screen.
+        let frame = match (scene::current(mtm), window_attributes.inner_size) {
+            (Some(scene), _) => unsafe { scene.coordinateSpace().bounds() },
+            (None, inner_size) => match inner_size {
+                Some(dim) => {
+                    let scale_factor = screen.scale();
+                    let size = dim.to_logical::<f64>(scale_factor as f64);
+                    CGRect {
+                        origin: screen_bounds.origin,
+                        size: CGSize { width: size.width as _, height: size.height as _ },
+                    }
+                },
+                None => screen_bounds,
             },
-            None => screen_bounds,
         };
 
         let view = WinitView::new(mtm, &window_attributes, frame);

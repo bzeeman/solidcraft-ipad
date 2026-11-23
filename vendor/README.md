@@ -200,6 +200,16 @@ SolidCraft changes:
   "\t" and were reported as character keys of that text, which egui-winit maps to no key and
   drops as text (a control character): Return in a dimension's box did nothing. Read in the
   code; not pressed on a device yet.
+- `src/platform_impl/ios/scene.rs` (new), `event_loop.rs`, `window.rs`, `app_state.rs`,
+  `src/platform/ios.rs`, `Cargo.toml` (the iPad app): the UIScene life cycle, which an app built
+  with the iOS 27 SDK must have and winit 0.30 and 0.31 lack. `WinitSceneDelegate`, named in the
+  app's Info.plist, keeps the window scene; windows are made in it (`initWithWindowScene:`, the
+  scene's size, not the screen's), and one made before it connects moves into it. `Resumed`,
+  `Suspended` and `Occluded` come from the scene's and the application's reports alike, each
+  change sent once (`Lifecycle`). Files the system hands the app (`openURLContexts`, or the
+  connection options of a cold start) get their security scope started and wait for
+  `platform::ios::take_opened_files`, with a redraw so an idle app looks. Without the manifest
+  in the Info.plist nothing of it runs. Not run on a device yet.
 - `Cargo.toml`: enable the `unstable` feature of `wayland-protocols` on the Linux dependency
   (the `wp::pointer_gestures` module); drop the example and test targets.
 - `src/event.rs`, `src/changelog/unreleased.md`: the platform notes of both events and the

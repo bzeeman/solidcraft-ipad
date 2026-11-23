@@ -69,6 +69,20 @@ pub fn take() -> Vec<String> {
     std::mem::take(&mut *PENDING.lock().unwrap_or_else(PoisonError::into_inner))
 }
 
+/// Files the system asked the app to open (a tap on a design in Files, "Open in SolidCraft"),
+/// to open. Each is kept as a bookmark, as a picked file is, so it stays in the recent list.
+pub fn take_opened() -> Vec<String> {
+    let mut paths = Vec::new();
+    for path in winit::platform::ios::take_opened_files() {
+        let Some(text) = path.to_str() else { continue };
+        // The window layer started the file's security scope, so a URL of its path reaches it.
+        let url = NSURL::fileURLWithPath(&NSString::from_str(text));
+        remember(text, &url);
+        paths.push(text.to_string());
+    }
+    paths
+}
+
 /// What the picker is for.
 enum Ask {
     /// A file to read, of these extensions (none: anything).

@@ -57,10 +57,43 @@
   <true/>
   <key>LSSupportsOpeningDocumentsInPlace</key>
   <true/>
+  <!-- The UIScene life cycle, which apps built with the iOS 27 SDK must have: one scene, made by
+       the vendored winit's scene delegate (vendor/winit/src/platform_impl/ios/scene.rs). One
+       only: the app draws one window, and a second scene would stay empty. -->
+  <key>UIApplicationSceneManifest</key>
+  <dict>
+    <key>UIApplicationSupportsMultipleScenes</key>
+    <false/>
+    <key>UISceneConfigurations</key>
+    <dict>
+      <key>UIWindowSceneSessionRoleApplication</key>
+      <array>
+        <dict>
+          <key>UISceneConfigurationName</key>
+          <string>Default</string>
+          <key>UISceneDelegateClassName</key>
+          <string>WinitSceneDelegate</string>
+        </dict>
+      </array>
+    </dict>
+  </dict>
+  <!-- Designs open in SolidCraft from the Files app (a tap, or "Open in"), in place: the scene
+       delegate hands the file to the shell, which opens it as a picked one. -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>SolidCraft design</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Owner</string>
+      <key>LSItemContentTypes</key>
+      <array><string>io.tangencylabs.solidcraft.design</string></array>
+    </dict>
+  </array>
   <!-- The design type, as the macOS app declares it (assets/platforms/macos/Info.plist.in), so the
-       document picker knows .sc files by name. No CFBundleDocumentTypes yet: the iPad shell can't
-       take a file the Files app hands it (winit 0.30 has no application delegate on iOS), so it
-       doesn't offer to. -->
+       document picker and the Files app know .sc files by name. -->
   <key>UTExportedTypeDeclarations</key>
   <array>
     <dict>

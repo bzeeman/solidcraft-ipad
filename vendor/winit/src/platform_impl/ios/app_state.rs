@@ -455,6 +455,32 @@ pub(crate) fn queue_gl_or_metal_redraw(mtm: MainThreadMarker, window: Retained<W
     }
 }
 
+/// SolidCraft: a redraw of every window, if the event loop is in a state that takes one (an
+/// event from UIKit, such as a file to open, arrives while it processes events).
+pub(crate) fn request_redraw_all_windows(mtm: MainThreadMarker) {
+    let mut windows = Vec::new();
+    #[allow(deprecated)]
+    for window in UIApplication::sharedApplication(mtm).windows().iter() {
+        if window.is_kind_of::<WinitUIWindow>() {
+            // SAFETY: We just checked that the window is a `winit` window
+            let ptr: *const UIWindow = window;
+            if let Some(window) = unsafe { Retained::retain(ptr.cast_mut().cast::<WinitUIWindow>()) } {
+                windows.push(window);
+            }
+        }
+    }
+    let mut this = AppState::get_mut(mtm);
+    match this.state_mut() {
+        &mut AppStateImpl::NotLaunched { ref mut queued_gpu_redraws, .. }
+        | &mut AppStateImpl::Launching { ref mut queued_gpu_redraws, .. }
+        | &mut AppStateImpl::ProcessingEvents { ref mut queued_gpu_redraws, .. }
+        | &mut AppStateImpl::InUserCallback { ref mut queued_gpu_redraws, .. } => {
+            queued_gpu_redraws.extend(windows);
+        },
+        _ => {},
+    }
+}
+
 pub(crate) fn will_launch(mtm: MainThreadMarker, queued_handler: EventLoopHandler) {
     AppState::get_mut(mtm).will_launch_transition(queued_handler)
 }

@@ -433,3 +433,18 @@ pub enum StatusBarStyle {
     LightContent,
     DarkContent,
 }
+
+/// SolidCraft: the paths of the files the system asked this app to open since the last call
+/// (a tap on one in Files, "Open in"), oldest first.
+///
+/// They arrive only when the app has the UIScene life cycle: its Info.plist names the scene
+/// delegate class `WinitSceneDelegate` (`UIApplicationSceneManifest`). Each file's security scope
+/// is already started and stays so while the app runs, so it can be read and written by path.
+/// The window is redrawn when files arrive, so an app can ask for them each frame. Empty off the
+/// main thread.
+pub fn take_opened_files() -> Vec<std::path::PathBuf> {
+    match objc2_foundation::MainThreadMarker::new() {
+        Some(mtm) => crate::platform_impl::take_opened_files(mtm),
+        None => Vec::new(),
+    }
+}

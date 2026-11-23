@@ -369,6 +369,8 @@ features = [
     "NSProcessInfo",
     "NSThread",
     "NSSet",
+    # SolidCraft: files handed to the app through its scene (platform_impl/ios/scene.rs).
+    "NSURL",
 ]
 
 [target.'cfg(target_os = "ios")'.dependencies.objc2-ui-kit]
@@ -392,6 +394,12 @@ features = [
     "UIRotationGestureRecognizer",
     "UIScreen",
     "UIScreenMode",
+    # SolidCraft: the UIScene life cycle (platform_impl/ios/scene.rs).
+    "UIOpenURLContext",
+    "UIScene",
+    "UISceneOptions",
+    "UISceneSession",
+    "UIWindowScene",
     "UITapGestureRecognizer",
     "UITouch",
     "UITraitCollection",

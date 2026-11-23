@@ -47,4 +47,6 @@ eframe = { workspace = true, features = ["default_fonts", "wgpu"] }
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString", "NSURL"] }
 objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-uniform-type-identifiers", "UIApplication", "UIDocumentPickerViewController", "UIResponder", "UIView", "UIViewController", "UIWindow"] }
+# The vendored winit (patched in the workspace), for the files the system hands the app.
+winit = { version = "0.30", default-features = false }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType"] }

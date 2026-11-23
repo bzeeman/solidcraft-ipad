@@ -31,9 +31,9 @@ use crate::platform::ios::Idiom;
 use crate::platform_impl::ios::app_state::{EventLoopHandler, HandlePendingUserEvents};
 use crate::window::{CustomCursor, CustomCursorSource, Theme};
 
-use super::app_state::{send_occluded_event_for_all_windows, AppState, EventWrapper};
+use super::app_state::{AppState, EventWrapper};
 use super::notification_center::create_observer;
-use super::{app_state, monitor, MonitorHandle};
+use super::{app_state, monitor, scene, MonitorHandle};
 
 #[derive(Debug)]
 pub struct ActiveEventLoop {
@@ -190,45 +190,27 @@ impl<T: 'static> EventLoop<T> {
             &center,
             // `applicationDidBecomeActive:`
             unsafe { UIApplicationDidBecomeActiveNotification },
-            move |_| {
-                app_state::handle_nonuser_event(mtm, EventWrapper::StaticEvent(Event::Resumed));
-            },
+            // SolidCraft: through `scene`, which sends each change once whether the scene or the
+            // application reports it.
+            move |_| scene::set_active(mtm, true),
         );
         let _will_resign_active_observer = create_observer(
             &center,
             // `applicationWillResignActive:`
             unsafe { UIApplicationWillResignActiveNotification },
-            move |_| {
-                app_state::handle_nonuser_event(mtm, EventWrapper::StaticEvent(Event::Suspended));
-            },
+            move |_| scene::set_active(mtm, false),
         );
         let _will_enter_foreground_observer = create_observer(
             &center,
             // `applicationWillEnterForeground:`
             unsafe { UIApplicationWillEnterForegroundNotification },
-            move |notification| {
-                let app = unsafe { notification.object() }.expect(
-                    "UIApplicationWillEnterForegroundNotification to have application object",
-                );
-                // SAFETY: The `object` in `UIApplicationWillEnterForegroundNotification` is
-                // documented to be `UIApplication`.
-                let app: Retained<UIApplication> = unsafe { Retained::cast(app) };
-                send_occluded_event_for_all_windows(&app, false);
-            },
+            move |_| scene::set_foreground(mtm, true),
         );
         let _did_enter_background_observer = create_observer(
             &center,
             // `applicationDidEnterBackground:`
             unsafe { UIApplicationDidEnterBackgroundNotification },
-            move |notification| {
-                let app = unsafe { notification.object() }.expect(
-                    "UIApplicationDidEnterBackgroundNotification to have application object",
-                );
-                // SAFETY: The `object` in `UIApplicationDidEnterBackgroundNotification` is
-                // documented to be `UIApplication`.
-                let app: Retained<UIApplication> = unsafe { Retained::cast(app) };
-                send_occluded_event_for_all_windows(&app, true);
-            },
+            move |_| scene::set_foreground(mtm, false),
         );
         let _will_terminate_observer = create_observer(
             &center,
@@ -301,6 +283,9 @@ impl<T: 'static> EventLoop<T> {
             fn _NSGetArgc() -> *mut c_int;
             fn _NSGetArgv() -> *mut *mut *mut c_char;
         }
+
+        // SolidCraft: UIKit looks up the scene delegate of the Info.plist by its class name.
+        scene::WinitSceneDelegate::register();
 
         unsafe {
             UIApplicationMain(
