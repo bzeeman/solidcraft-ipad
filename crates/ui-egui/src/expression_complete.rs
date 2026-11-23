@@ -145,8 +145,25 @@ pub(crate) fn showing(ctx: &egui::Context, editor: egui::Id) -> bool {
         .is_some_and(|p| p.editor == editor && p.count > 0 && !p.dismissed && p.frame.saturating_add(1) >= ctx.cumulative_frame_nr())
 }
 
+/// Where [`complete`] notes the expression box that has the focus, and the frame it did.
+fn focus_id() -> egui::Id {
+    egui::Id::unique("expression_box_focus")
+}
+
+/// The expression box (a value, a dimension, a parameter) that has the focus, if it was drawn in
+/// this frame or the last. A shell with keys of its own for numbers (the iPad's number pad) shows
+/// them for these boxes and leaves every other text box to the system's keyboard.
+pub(crate) fn focused(ctx: &egui::Context) -> Option<egui::Id> {
+    let (id, frame) = ctx.data(|d| d.get_temp::<(egui::Id, u64)>(focus_id()))?;
+    (frame.saturating_add(1) >= ctx.cumulative_frame_nr() && ctx.memory(|m| m.has_focus(id))).then_some(id)
+}
+
 pub(crate) fn complete(ui: &mut egui::Ui, resp: &egui::Response, text: &mut String) -> bool {
     let ctx = ui.ctx().clone();
+    if ctx.memory(|m| m.has_focus(resp.id)) {
+        let frame = ctx.cumulative_frame_nr();
+        ctx.data_mut(|d| d.insert_temp(focus_id(), (resp.id, frame)));
+    }
     // The field's right-click menu is open (#8875): the suggestions wait rather than cover it.
     if ui_kit::text_menu_open(&ctx, resp.id) {
         return false;

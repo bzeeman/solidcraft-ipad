@@ -1402,6 +1402,18 @@ pub(crate) fn every_parameter(ctx: &egui::Context) -> Vec<Suggestion> {
     cache.all.iter().filter(|s| s.kind == "parameter").take(cache.every).cloned().collect()
 }
 
+/// The expression box that has the focus (see `expression_complete::focused`), for a shell
+/// that offers its own keys for numbers.
+pub fn focused_expression(ctx: &egui::Context) -> Option<egui::Id> {
+    crate::expression_complete::focused(ctx)
+}
+
+/// The design's named parameters an expression box can use, as many as its list of every
+/// parameter shows (the `parameter_list_rows` preference), in that list's order.
+pub fn parameter_names(ctx: &egui::Context) -> Vec<String> {
+    every_parameter(ctx).into_iter().map(|s| s.text).collect()
+}
+
 /// Is `word` itself one of the known tokens (a parameter or dimension name, a constant or a
 /// unit)? Such a word is ready to submit as typed; the popup then only offers longer names.
 pub(crate) fn exact_token(ctx: &egui::Context, word: &str) -> bool {
