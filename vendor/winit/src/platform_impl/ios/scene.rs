@@ -21,7 +21,7 @@ use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 
 use objc2::rc::Retained;
-use objc2::{declare_class, mutability, ClassType, DeclaredClass};
+use objc2::{declare_class, msg_send_id, mutability, ClassType, DeclaredClass};
 use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSSet};
 use objc2_ui_kit::{
     UIApplication, UIOpenURLContext, UIScene, UISceneConnectionOptions, UISceneDelegate,
@@ -183,7 +183,13 @@ declare_class!(
                 }
             }
             // Started by a tap on a file: the app's first frame takes it.
-            let _ = receive(&*unsafe { options.URLContexts() });
+            // The headers say never nil, but a launch without files gives nil (seen in the
+            // simulator), so this asks for an optional answer instead of `options.URLContexts()`.
+            let contexts: Option<Retained<NSSet<UIOpenURLContext>>> =
+                unsafe { msg_send_id![options, URLContexts] };
+            if let Some(contexts) = contexts {
+                let _ = receive(&contexts);
+            }
         }
 
         #[method(sceneDidDisconnect:)]
