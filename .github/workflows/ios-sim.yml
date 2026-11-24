@@ -20,7 +20,7 @@ name: iPad spike
 
 on:
   push:
-    branches: [ios-sim-spike, ipad-pencil-spike, claude/project-thread-1bvly3]
+    branches: [ios-sim-spike, ipad-pencil-spike, claude/project-thread-1bvly3, ipad, "sync/upstream-*"]
   workflow_dispatch:
 
 permissions:
