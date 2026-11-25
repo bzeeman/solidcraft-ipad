@@ -145,13 +145,16 @@ pub struct Touches {
     /// The pointer let go in the last frame and nothing has moved it since: it leaves the
     /// screen in this one.
     gone: bool,
+    /// A Shift click was let go in the last frame: Shift goes in this one. egui reads a click on
+    /// its release, with the frame's last modifiers, so they must outlast the release's frame.
+    unshift: bool,
     notes: VecDeque<String>,
     now: f64,
 }
 
 impl Default for Touches {
     fn default() -> Self {
-        Self { mode: Mode::Idle, pencil: None, ignored: Vec::new(), release: None, gone: false, notes: VecDeque::new(), now: 0.0 }
+        Self { mode: Mode::Idle, pencil: None, ignored: Vec::new(), release: None, gone: false, unshift: false, notes: VecDeque::new(), now: 0.0 }
     }
 }
 
@@ -227,6 +230,9 @@ impl Touches {
         let mut out = Out { events: Vec::with_capacity(raw.events.len() + 4), let_go: false };
         if std::mem::take(&mut self.gone) {
             out.push(Event::PointerGone);
+        }
+        if std::mem::take(&mut self.unshift) {
+            out.push(Event::ModifiersChanged(Modifiers::NONE));
         }
         self.let_go(&mut out);
         match self.mode {
@@ -352,9 +358,8 @@ impl Touches {
     fn let_go(&mut self, out: &mut Out) {
         if let Some((at, which, modifiers)) = self.release.take() {
             out.push(press_with(at, which, false, modifiers));
-            if !modifiers.is_none() {
-                out.push(Event::ModifiersChanged(Modifiers::NONE));
-            }
+            // Let go of the modifiers in the next frame (the pointer's going wakes it).
+            self.unshift |= !modifiers.is_none();
         }
     }
 
@@ -977,8 +982,9 @@ mod tests {
             );
             assert!(heard.held.is_some());
             let (_, seen) = frame(&mut touches, time + 0.12, vec![]);
-            assert_eq!(seen, vec![press_with(at, PointerButton::Primary, false, Modifiers::SHIFT), Event::ModifiersChanged(Modifiers::NONE)]);
-            frame(&mut touches, time + 0.14, vec![]);
+            assert_eq!(seen, vec![press_with(at, PointerButton::Primary, false, Modifiers::SHIFT)], "Shift outlasts the release's frame");
+            let (_, seen) = frame(&mut touches, time + 0.14, vec![]);
+            assert_eq!(seen, vec![Event::PointerGone, Event::ModifiersChanged(Modifiers::NONE)]);
         }
         // The held finger lifts after Shift clicks: no right click.
         let (_, seen) = frame(&mut touches, 4.0, vec![finger(1, TouchPhase::End, down)]);
