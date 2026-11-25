@@ -68,6 +68,8 @@ mod ios {
 
     /// How far the ring's disc reaches past its keys.
     const RING_RIM: f32 = 6.0;
+    /// The radius of the ring marking a held finger, in points: wider than a fingertip.
+    const FINGER_MARK: f32 = 34.0;
 
     struct Shell {
         app: SolveApp,
@@ -163,6 +165,11 @@ mod ios {
 
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("pencil-readout")));
             let font = egui::FontId::proportional(13.0);
+            if let Some(at) = self.input.held {
+                // A held finger: a ring around it, outside the fingertip, and Shift beside it.
+                painter.circle_stroke(at, FINGER_MARK, egui::Stroke::new(3.0, tokens.accent));
+                painter.text(at + egui::vec2(0.0, -FINGER_MARK - 6.0), egui::Align2::CENTER_BOTTOM, "Shift", font.clone(), tokens.accent);
+            }
             let held = self.input.pencil.held_text();
             if !held.is_empty()
                 && let Some(tip) = self.input.pencil.tip()
