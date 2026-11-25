@@ -6,7 +6,11 @@
 //! this app wants, so that the Pencil points and fingers move the view:
 //!
 //! - the Pencil's tip is the left button, as before. While it is on the screen fingers do
-//!   nothing (a hand resting beside it), and they stay dead until they lift;
+//!   nothing (a hand resting beside it), and they stay dead until they lift. The pointer stays
+//!   where the tip came down until the tip has slid more than [`PENCIL_SLOP`] from there: a tip
+//!   on glass slides a millimetre or so on an ordinary tap, and egui's own 6 points let that
+//!   drag a part across the model. Then it follows the tip, catching up at once, so the point
+//!   grabbed stays under the tip. A still tip moves nothing however long it rests;
 //! - one finger that moves more than [`SLOP`] drags with the left button from where it came
 //!   down: the press there in one frame, the way to the finger in the next, so that what is
 //!   pressed is what the finger came down on. Over the model that turns the view, because the
@@ -67,6 +71,11 @@ pub const JOIN: f64 = 0.4;
 const MIN_SPREAD: f32 = 24.0;
 /// The most one movement of a finger may zoom by, either way.
 const MAX_ZOOM_STEP: f32 = 2.0;
+/// The Pencil's tip moves the pointer only once it is further than this (points) from where it
+/// came down; before that the pointer stays there, and a lift there is a click there. About
+/// 3 mm on the 13-inch iPad (264 pixels per inch, 2 pixels a point). Ben chose a bigger dead
+/// zone for the tip, 2026-11-25, after it moved parts by accident.
+pub const PENCIL_SLOP: f32 = 16.0;
 /// The dead touches remembered at once; a stream that never lifts them loses the oldest.
 const MAX_IGNORED: usize = 16;
 /// The readout keeps this many of the latest gestures.
@@ -137,6 +146,8 @@ pub struct Touches {
     mode: Mode,
     /// The Pencil's tip, while it is on the screen.
     pencil: Option<Touch>,
+    /// Where the tip came down, while it has not gone [`PENCIL_SLOP`] from there.
+    tip_origin: Option<Pos2>,
     /// Touches that do nothing until they lift.
     ignored: Vec<TouchId>,
     /// A tap's (or a hold's) release, owed to the next frame: the app gets its press and its
@@ -154,7 +165,7 @@ pub struct Touches {
 
 impl Default for Touches {
     fn default() -> Self {
-        Self { mode: Mode::Idle, pencil: None, ignored: Vec::new(), release: None, gone: false, unshift: false, notes: VecDeque::new(), now: 0.0 }
+        Self { mode: Mode::Idle, pencil: None, tip_origin: None, ignored: Vec::new(), release: None, gone: false, unshift: false, notes: VecDeque::new(), now: 0.0 }
     }
 }
 
@@ -443,6 +454,7 @@ impl Touches {
         heard.fingers = false;
         out.extend([Event::PointerMoved(touch.at), button(touch.at, true)]);
         self.pencil = Some(touch);
+        self.tip_origin = Some(touch.at);
     }
 
     fn finger_down(&mut self, touch: Touch, out: &mut Out, heard: &mut Heard) {
@@ -506,7 +518,13 @@ impl Touches {
             && pencil.id == touch.id
         {
             pencil.at = touch.at;
-            out.push(Event::PointerMoved(touch.at));
+            match self.tip_origin {
+                Some(origin) if origin.distance(touch.at) <= PENCIL_SLOP => {}
+                _ => {
+                    self.tip_origin = None;
+                    out.push(Event::PointerMoved(touch.at));
+                }
+            }
             return;
         }
         match self.mode {
@@ -582,6 +600,12 @@ impl Touches {
             && pencil.id == id
         {
             let at = at.unwrap_or(pencil.at);
+            // Lifted within the dead zone: let go where it came down, so a tap that slid a
+            // little is a click there and not a drag.
+            let at = match self.tip_origin.take() {
+                Some(origin) if origin.distance(at) <= PENCIL_SLOP => origin,
+                _ => at,
+            };
             out.extend([Event::PointerMoved(at), button(at, false)]);
             self.pencil = None;
             // For the log only: the readout's few lines are the fingers'.
@@ -1258,9 +1282,9 @@ mod tests {
         let (heard, seen) = frame(&mut touches, 1.0, vec![tip(7, TouchPhase::Start, down)]);
         assert_eq!(seen, vec![Event::PointerMoved(down), button(down, true)]);
         assert!(!heard.fingers && heard.drag.is_none() && heard.wake.is_none());
-        // No slop: a stroke begins where the tip lands.
+        // Within the dead zone the pointer stays where the tip came down.
         let (heard, seen) = frame(&mut touches, 1.01, vec![tip(7, TouchPhase::Move, on)]);
-        assert_eq!(seen, vec![Event::PointerMoved(on)]);
+        assert!(seen.is_empty(), "{seen:?}");
         assert!(!heard.fingers);
         assert_eq!(touches.readout(), vec!["touch: the Pencil's tip".to_owned()]);
         let (heard, seen) = frame(&mut touches, 1.3, vec![tip(7, TouchPhase::End, up)]);
@@ -1276,6 +1300,36 @@ mod tests {
         assert_eq!(raw.events, vec![Event::PointerGone, Event::PointerMoved(hover)]);
         let (_, seen) = frame(&mut touches, 1.32, vec![]);
         assert!(seen.is_empty(), "{seen:?}");
+    }
+
+    #[test]
+    fn a_pencil_tip_that_slides_or_rests_within_its_dead_zone_moves_nothing_and_taps_where_it_came_down() {
+        let mut touches = Touches::default();
+        let down = at(200.0, 300.0);
+        frame(&mut touches, 1.0, vec![tip(7, TouchPhase::Start, down)]);
+        // It slides most of the dead zone and rests there far past egui's click time.
+        let slid = down + vec2(PENCIL_SLOP - 1.0, 0.0);
+        let (_, seen) = frame(&mut touches, 1.05, vec![tip(7, TouchPhase::Move, slid)]);
+        assert!(seen.is_empty(), "{seen:?}");
+        let (_, seen) = frame(&mut touches, 3.0, vec![tip(7, TouchPhase::Move, slid + vec2(0.0, 0.5))]);
+        assert!(seen.is_empty(), "a resting tip's tremor moves nothing: {seen:?}");
+        let (_, seen) = frame(&mut touches, 3.1, vec![tip(7, TouchPhase::End, slid)]);
+        assert_eq!(seen, vec![Event::PointerMoved(down), button(down, false)], "let go where it came down");
+    }
+
+    #[test]
+    fn a_pencil_tip_past_its_dead_zone_drags_from_the_tip_on() {
+        let mut touches = Touches::default();
+        let down = at(200.0, 300.0);
+        frame(&mut touches, 1.0, vec![tip(7, TouchPhase::Start, down)]);
+        let past = down + vec2(0.0, PENCIL_SLOP + 1.0);
+        let (_, seen) = frame(&mut touches, 1.05, vec![tip(7, TouchPhase::Move, past)]);
+        assert_eq!(seen, vec![Event::PointerMoved(past)], "it catches up at once");
+        // Back inside the circle it still follows: the dead zone is only the start's.
+        let (_, seen) = frame(&mut touches, 1.1, vec![tip(7, TouchPhase::Move, down)]);
+        assert_eq!(seen, vec![Event::PointerMoved(down)]);
+        let (_, seen) = frame(&mut touches, 1.2, vec![tip(7, TouchPhase::End, down + vec2(2.0, 0.0))]);
+        assert_eq!(seen, vec![Event::PointerMoved(down + vec2(2.0, 0.0)), button(down + vec2(2.0, 0.0), false)]);
     }
 
     #[test]
