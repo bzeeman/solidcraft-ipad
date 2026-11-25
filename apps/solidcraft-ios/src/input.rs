@@ -117,6 +117,9 @@ pub struct Input {
     /// from the input hook, a wait is weighed against the previous pass's request and dropped
     /// when that one was "at once", and the held squeeze then never opened its ring.
     pub wake: Option<f64>,
+    /// A finger is held here ([`touch::HOLD`]): the shell marks it, since taps of another are
+    /// Shift clicks now and its lift a right click.
+    pub held: Option<Pos2>,
 }
 
 impl Input {
@@ -152,6 +155,7 @@ impl Input {
             log::info!(target: "solidcraft_ios", "touch: {note}");
         }
         self.finger_drag(app, touched.drag, touched.taken_back);
+        self.held = touched.held;
         self.pencil.fingers(touched.fingers);
         self.demo_input(content, raw);
         let ring = self.pencil.ring().is_some();

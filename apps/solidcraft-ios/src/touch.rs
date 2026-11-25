@@ -6,13 +6,23 @@
 //! this app wants, so that the Pencil points and fingers move the view:
 //!
 //! - the Pencil's tip is the left button, as before. While it is on the screen fingers do
-//!   nothing (a hand resting beside it), and they stay dead until they lift;
+//!   nothing (a hand resting beside it), and they stay dead until they lift. The pointer stays
+//!   where the tip came down until the tip has slid more than [`PENCIL_SLOP`] from there: a tip
+//!   on glass slides a millimetre or so on an ordinary tap, and egui's own 6 points let that
+//!   drag a part across the model. Then it follows the tip, catching up at once, so the point
+//!   grabbed stays under the tip. A still tip moves nothing however long it rests;
 //! - one finger that moves more than [`SLOP`] drags with the left button from where it came
 //!   down: the press there in one frame, the way to the finger in the next, so that what is
 //!   pressed is what the finger came down on. Over the model that turns the view, because the
 //!   shell lights the navigation bar's Orbit mode for as long as the drag lasts; in a list it
 //!   scrolls, on a slider it slides;
-//! - one finger lifted before it moved that far, within [`TAP`], is a click where it came down;
+//! - one finger lifted before it moved that far, within [`HOLD`], is a click where it came down;
+//! - one finger held that still for [`HOLD`] is held ([`Heard::held`], which the shell marks):
+//!   each quick, still tap of another finger meanwhile is a Shift click where it taps, and if
+//!   none came, lifting the held finger is a right click where it came down (the context menus
+//!   open on it). A second finger that moves instead pans and pinches with it, as below. A
+//!   second finger's quick, still tap before the hold is a Shift click too, and the first is
+//!   then held as if its time were up;
 //! - two fingers are a trackpad's two-finger scroll and pinch, which the camera already pans and
 //!   zooms with and lists scroll with. The pointer sits between the fingers meanwhile, so the
 //!   zoom is about that point. When one lifts, the other waits for a second and does nothing
@@ -43,9 +53,10 @@ use egui::{Event, Modifiers, MouseWheelSource, MouseWheelUnit, PointerButton, Po
 /// before that is a tap. More than egui's own click distance (6), so that the release of a drag
 /// is never a click.
 pub const SLOP: f32 = 10.0;
-/// A finger lifted later than this (seconds) without having moved clicks nothing: egui gives a
-/// mouse button the same time.
-pub const TAP: f64 = 0.8;
+/// A finger held this long (seconds) without moving [`SLOP`] is a right click where it came
+/// down; one lifted sooner is a click. Less than egui's click time (0.8), so a tap is always a
+/// click. Ben's taps on the iPad took 0.05 to 0.17 s.
+pub const HOLD: f64 = 0.5;
 /// A finger begins no drag in its first moments on the screen (seconds), however far it moves:
 /// the second finger of a pair lands within them more often than not. A guess until the iPad's
 /// log says how far apart Ben's two fingers land (the note of a second finger gives the time).
@@ -60,6 +71,11 @@ pub const JOIN: f64 = 0.4;
 const MIN_SPREAD: f32 = 24.0;
 /// The most one movement of a finger may zoom by, either way.
 const MAX_ZOOM_STEP: f32 = 2.0;
+/// The Pencil's tip moves the pointer only once it is further than this (points) from where it
+/// came down; before that the pointer stays there, and a lift there is a click there. About
+/// 3 mm on the 13-inch iPad (264 pixels per inch, 2 pixels a point). Ben chose a bigger dead
+/// zone for the tip, 2026-11-25, after it moved parts by accident.
+pub const PENCIL_SLOP: f32 = 16.0;
 /// The dead touches remembered at once; a stream that never lifts them loses the oldest.
 const MAX_IGNORED: usize = 16;
 /// The readout keeps this many of the latest gestures.
@@ -84,9 +100,15 @@ enum Mode {
     Drag { finger: Touch, origin: Pos2, since: f64, shown: bool },
     /// Two fingers scroll and pinch; how far and how much so far, since when and from where
     /// (the point between them), for the readout and the log.
-    Two { a: Touch, b: Touch, moved: Vec2, zoomed: f32, since: f64, from: Pos2 },
+    /// `tap` holds where each came down while the second (`b`) may yet be a Shift tap: they
+    /// began one finger at a time and neither has gone [`SLOP`] since.
+    Two { a: Touch, b: Touch, moved: Vec2, zoomed: f32, since: f64, from: Pos2, tap: Option<(Pos2, Pos2)> },
     /// One of two fingers lifted: the other waits for a second one, and alone does nothing.
     Rest { finger: Touch },
+    /// One finger held still for [`HOLD`] at `origin`. `tap` is another finger down since the
+    /// time given, where it came down; `shifted` says a tap has Shift-clicked already, so the
+    /// lift is no right click.
+    Held { finger: Touch, origin: Pos2, tap: Option<(Touch, Pos2, f64)>, shifted: bool },
 }
 
 /// What [`Touches::frame`] heard in a frame's input.
@@ -107,6 +129,8 @@ pub struct Heard {
     pub wake: Option<f64>,
     /// The gestures that ended in this frame, for the log.
     pub notes: Vec<String>,
+    /// A finger is held (see [`HOLD`]) here: taps of another are Shift clicks.
+    pub held: Option<Pos2>,
 }
 
 impl Heard {
@@ -122,26 +146,39 @@ pub struct Touches {
     mode: Mode,
     /// The Pencil's tip, while it is on the screen.
     pencil: Option<Touch>,
+    /// Where the tip came down, while it has not gone [`PENCIL_SLOP`] from there.
+    tip_origin: Option<Pos2>,
     /// Touches that do nothing until they lift.
     ignored: Vec<TouchId>,
-    /// A tap's release, owed to the next frame: the app gets its press and its release a frame
-    /// apart, as from a finger.
-    release: Option<Pos2>,
+    /// A tap's (or a hold's) release, owed to the next frame: the app gets its press and its
+    /// release a frame apart, as from a finger. Modifiers held for the click are let go after.
+    release: Option<(Pos2, PointerButton, Modifiers)>,
     /// The pointer let go in the last frame and nothing has moved it since: it leaves the
     /// screen in this one.
     gone: bool,
+    /// A Shift click was let go in the last frame: Shift goes in this one. egui reads a click on
+    /// its release, with the frame's last modifiers, so they must outlast the release's frame.
+    unshift: bool,
     notes: VecDeque<String>,
     now: f64,
 }
 
 impl Default for Touches {
     fn default() -> Self {
-        Self { mode: Mode::Idle, pencil: None, ignored: Vec::new(), release: None, gone: false, notes: VecDeque::new(), now: 0.0 }
+        Self { mode: Mode::Idle, pencil: None, tip_origin: None, ignored: Vec::new(), release: None, gone: false, unshift: false, notes: VecDeque::new(), now: 0.0 }
     }
 }
 
 fn button(at: Pos2, pressed: bool) -> Event {
-    Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE }
+    press(at, PointerButton::Primary, pressed)
+}
+
+fn press(at: Pos2, button: PointerButton, pressed: bool) -> Event {
+    press_with(at, button, pressed, Modifiers::NONE)
+}
+
+fn press_with(at: Pos2, button: PointerButton, pressed: bool, modifiers: Modifiers) -> Event {
+    Event::PointerButton { pos: at, button, pressed, modifiers }
 }
 
 /// A step of a trackpad's two-finger scroll, `delta` points the way the fingers went.
@@ -205,6 +242,9 @@ impl Touches {
         if std::mem::take(&mut self.gone) {
             out.push(Event::PointerGone);
         }
+        if std::mem::take(&mut self.unshift) {
+            out.push(Event::ModifiersChanged(Modifiers::NONE));
+        }
         self.let_go(&mut out);
         match self.mode {
             Mode::Drag { finger, origin, since, shown } => {
@@ -217,6 +257,7 @@ impl Touches {
                 }
             }
             Mode::Waiting { .. } | Mode::Two { .. } => heard.fingers = true,
+            Mode::Held { .. } => heard.fingers = true,
             Mode::Idle | Mode::Rest { .. } => {}
         }
 
@@ -239,6 +280,9 @@ impl Touches {
             }
         }
         self.ripen(&mut out, &mut heard);
+        if let Mode::Held { finger, .. } = self.mode {
+            heard.held = Some(finger.at);
+        }
         if out.let_go {
             // The click is read where the pointer is: it stays for this frame.
             self.gone = true;
@@ -256,12 +300,23 @@ impl Touches {
     }
 
     /// At the end of a frame's input: a finger still alone and further than [`SLOP`] from where
-    /// it came down begins its drag, once its first moments are over.
+    /// it came down begins its drag, once its first moments are over; one still within it after
+    /// [`HOLD`] right-clicks there.
     fn ripen(&mut self, out: &mut Out, heard: &mut Heard) {
         let Mode::Waiting { finger, origin, since } = self.mode else {
             return;
         };
         if origin.distance(finger.at) <= SLOP {
+            let held = self.now - since;
+            if !(0.0..HOLD).contains(&held) {
+                // Held still (or a clock that ran backwards): held, until it lifts or another
+                // finger taps.
+                self.mode = Mode::Held { finger, origin, tap: None, shifted: false };
+                heard.fingers = true;
+                heard.notes.push(format!("finger held at {:.0}, {:.0}", origin.x, origin.y));
+            } else {
+                heard.wake(HOLD - held);
+            }
             return;
         }
         if let Some(left) = self.settling(since) {
@@ -294,6 +349,7 @@ impl Touches {
             Mode::Idle => {}
             Mode::Waiting { .. } => lines.push("touch: one finger, not moved yet".to_owned()),
             Mode::Drag { .. } => lines.push("touch: one finger dragging".to_owned()),
+            Mode::Held { .. } => lines.push("touch: one finger held: taps of another are Shift clicks".to_owned()),
             Mode::Two { moved, zoomed, .. } => lines.push(format!("touch: two fingers, moved {:.0}, {:.0} pt, zoom x{zoomed:.2}", moved.x, moved.y)),
             Mode::Rest { .. } => lines.push("touch: one of two fingers left".to_owned()),
         }
@@ -311,8 +367,10 @@ impl Touches {
 
     /// The release a tap still owes.
     fn let_go(&mut self, out: &mut Out) {
-        if let Some(at) = self.release.take() {
-            out.push(button(at, false));
+        if let Some((at, which, modifiers)) = self.release.take() {
+            out.push(press_with(at, which, false, modifiers));
+            // Let go of the modifiers in the next frame (the pointer's going wakes it).
+            self.unshift |= !modifiers.is_none();
         }
     }
 
@@ -328,6 +386,7 @@ impl Touches {
             Mode::Idle => false,
             Mode::Waiting { finger, .. } | Mode::Drag { finger, .. } | Mode::Rest { finger } => finger.id == id,
             Mode::Two { a, b, .. } => a.id == id || b.id == id,
+            Mode::Held { finger, tap, .. } => finger.id == id || tap.is_some_and(|(tap, ..)| tap.id == id),
         };
         finger || self.pencil.is_some_and(|pencil| pencil.id == id) || self.ignored.contains(&id)
     }
@@ -358,6 +417,13 @@ impl Touches {
         match std::mem::replace(&mut self.mode, Mode::Idle) {
             Mode::Idle => {}
             Mode::Waiting { finger, .. } | Mode::Rest { finger } => self.ignore(finger.id),
+            Mode::Held { finger, tap, .. } => {
+                self.ignore(finger.id);
+                if let Some((tap, ..)) = tap {
+                    self.ignore(tap.id);
+                }
+                self.note("a held finger, then the Pencil came down: nothing done".to_owned(), heard);
+            }
             Mode::Drag { finger, origin, since, .. } => {
                 out.push(button(finger.at, false));
                 // The tip's press must not be read as the drag's: the shell lets go of the
@@ -388,6 +454,7 @@ impl Touches {
         heard.fingers = false;
         out.extend([Event::PointerMoved(touch.at), button(touch.at, true)]);
         self.pencil = Some(touch);
+        self.tip_origin = Some(touch.at);
     }
 
     fn finger_down(&mut self, touch: Touch, out: &mut Out, heard: &mut Heard) {
@@ -411,7 +478,7 @@ impl Touches {
                     self.now - since,
                     origin.distance(finger.at)
                 ));
-                self.two(finger, touch, out);
+                self.two_from(finger, touch, Some((origin, touch.at)), out);
             }
             Mode::Rest { finger } => self.two(finger, touch, out),
             Mode::Drag { finger, origin, since, .. } => {
@@ -425,16 +492,25 @@ impl Touches {
                 self.note(format!("one finger dragged {:.0} pt in {held:.2} s, then a second came down{undone}", origin.distance(finger.at)), heard);
                 self.two(finger, touch, out);
             }
-            Mode::Two { .. } => self.ignore(touch.id),
+            Mode::Held { finger, origin, tap: None, shifted } => {
+                out.push(Event::PointerMoved(touch.at));
+                self.mode = Mode::Held { finger, origin, tap: Some((touch, touch.at, self.now)), shifted };
+            }
+            Mode::Two { .. } | Mode::Held { .. } => self.ignore(touch.id),
         }
     }
 
     /// Two fingers begin a scroll, with the pointer between them.
     fn two(&mut self, a: Touch, b: Touch, out: &mut Out) {
+        self.two_from(a, b, None, out);
+    }
+
+    /// As [`Self::two`], with `b` perhaps a Shift tap: `tap` is where each came down.
+    fn two_from(&mut self, a: Touch, b: Touch, tap: Option<(Pos2, Pos2)>, out: &mut Out) {
         let from = between(a.at, b.at);
         point(out, from);
         out.push(wheel(TouchPhase::Start, Vec2::ZERO));
-        self.mode = Mode::Two { a, b, moved: Vec2::ZERO, zoomed: 1.0, since: self.now, from };
+        self.mode = Mode::Two { a, b, moved: Vec2::ZERO, zoomed: 1.0, since: self.now, from, tap };
     }
 
     fn moved(&mut self, touch: Touch, out: &mut Out, heard: &mut Heard) {
@@ -442,7 +518,13 @@ impl Touches {
             && pencil.id == touch.id
         {
             pencil.at = touch.at;
-            out.push(Event::PointerMoved(touch.at));
+            match self.tip_origin {
+                Some(origin) if origin.distance(touch.at) <= PENCIL_SLOP => {}
+                _ => {
+                    self.tip_origin = None;
+                    out.push(Event::PointerMoved(touch.at));
+                }
+            }
             return;
         }
         match self.mode {
@@ -460,10 +542,13 @@ impl Touches {
                 }
                 self.mode = Mode::Drag { finger: touch, origin, since, shown };
             }
-            Mode::Two { a, b, mut moved, mut zoomed, since, from } if a.id == touch.id || b.id == touch.id => {
+            Mode::Two { a, b, mut moved, mut zoomed, since, from, mut tap } if a.id == touch.id || b.id == touch.id => {
                 heard.fingers = true;
                 let (centre, spread) = (between(a.at, b.at), a.at.distance(b.at));
                 let (a, b) = if a.id == touch.id { (touch, b) } else { (a, touch) };
+                if tap.is_some_and(|(at_a, at_b)| at_a.distance(a.at) > SLOP || at_b.distance(b.at) > SLOP) {
+                    tap = None;
+                }
                 let (centre_now, spread_now) = (between(a.at, b.at), a.at.distance(b.at));
                 point(out, centre_now);
                 let delta = centre_now - centre;
@@ -478,9 +563,33 @@ impl Touches {
                         zoomed *= factor;
                     }
                 }
-                self.mode = Mode::Two { a, b, moved, zoomed, since, from };
+                self.mode = Mode::Two { a, b, moved, zoomed, since, from, tap };
             }
             Mode::Rest { finger } if finger.id == touch.id => self.mode = Mode::Rest { finger: touch },
+            Mode::Held { finger, origin, tap, shifted } if finger.id == touch.id => {
+                heard.fingers = true;
+                if origin.distance(touch.at) <= SLOP {
+                    self.mode = Mode::Held { finger: touch, origin, tap, shifted };
+                } else if let Some((other, ..)) = tap {
+                    // Both move: a pan or a pinch after all.
+                    self.two(touch, other, out);
+                } else {
+                    // The held finger slid off: it does nothing more.
+                    self.mode = Mode::Idle;
+                    self.ignore(touch.id);
+                    out.push(Event::PointerGone);
+                    self.note("a held finger slid away: nothing done".to_owned(), heard);
+                }
+            }
+            Mode::Held { finger, origin, tap: Some((other, from, since)), shifted } if other.id == touch.id => {
+                heard.fingers = true;
+                if from.distance(touch.at) <= SLOP {
+                    self.mode = Mode::Held { finger, origin, tap: Some((touch, from, since)), shifted };
+                } else {
+                    // Not a tap: the two pan and pinch.
+                    self.two(finger, touch, out);
+                }
+            }
             _ => {}
         }
     }
@@ -491,6 +600,12 @@ impl Touches {
             && pencil.id == id
         {
             let at = at.unwrap_or(pencil.at);
+            // Lifted within the dead zone: let go where it came down, so a tap that slid a
+            // little is a click there and not a drag.
+            let at = match self.tip_origin.take() {
+                Some(origin) if origin.distance(at) <= PENCIL_SLOP => origin,
+                _ => at,
+            };
             out.extend([Event::PointerMoved(at), button(at, false)]);
             self.pencil = None;
             // For the log only: the readout's few lines are the fingers'.
@@ -505,9 +620,9 @@ impl Touches {
                 // Past the slop with no drag begun: it went that far in its first moments, or
                 // within one frame's input. A flick too short to be meant.
                 let went = origin.distance(at.unwrap_or(finger.at));
-                if ended && went <= SLOP && (0.0..=TAP).contains(&held) {
+                if ended && went <= SLOP && (0.0..HOLD).contains(&held) {
                     out.extend([Event::PointerMoved(origin), button(origin, true)]);
-                    self.release = Some(origin);
+                    self.release = Some((origin, PointerButton::Primary, Modifiers::NONE));
                     heard.wake(0.0);
                     self.note(format!("finger tap at {:.0}, {:.0} after {held:.2} s", origin.x, origin.y), heard);
                 } else {
@@ -534,7 +649,25 @@ impl Touches {
                     heard,
                 );
             }
-            Mode::Two { a, b, moved, zoomed, since, from } if a.id == id || b.id == id => {
+            Mode::Two { a, b: second, tap: Some((origin, at_b)), since, .. }
+                if second.id == id && ended && (0.0..HOLD).contains(&(self.now - since)) && at.is_none_or(|at| at.distance(at_b) <= SLOP) =>
+            {
+                // The second finger tapped while the first stayed: a Shift click where it came
+                // down, and the first is held.
+                heard.fingers = true;
+                let shift = Modifiers::SHIFT;
+                out.extend([
+                    wheel(TouchPhase::End, Vec2::ZERO),
+                    Event::ModifiersChanged(shift),
+                    Event::PointerMoved(at_b),
+                    press_with(at_b, PointerButton::Primary, true, shift),
+                ]);
+                self.release = Some((at_b, PointerButton::Primary, shift));
+                heard.wake(0.0);
+                self.mode = Mode::Held { finger: a, origin, tap: None, shifted: true };
+                self.note(format!("Shift tap at {:.0}, {:.0} while the first finger stayed", at_b.x, at_b.y), heard);
+            }
+            Mode::Two { a, b, moved, zoomed, since, from, .. } if a.id == id || b.id == id => {
                 heard.fingers = true;
                 out.extend([wheel(TouchPhase::End, Vec2::ZERO), Event::PointerGone]);
                 self.mode = Mode::Rest { finger: if a.id == id { b } else { a } };
@@ -551,6 +684,43 @@ impl Touches {
                 );
             }
             Mode::Rest { finger } if finger.id == id => self.mode = Mode::Idle,
+            Mode::Held { finger, origin, tap, shifted } if finger.id == id => {
+                heard.fingers = true;
+                if let Some((other, ..)) = tap {
+                    // The tapping finger is left alone: it does nothing.
+                    self.mode = Mode::Rest { finger: other };
+                    out.push(Event::PointerGone);
+                    self.note("a held finger lifted while another was down: nothing done".to_owned(), heard);
+                } else if ended && !shifted {
+                    self.mode = Mode::Idle;
+                    out.extend([Event::PointerMoved(origin), press(origin, PointerButton::Secondary, true)]);
+                    self.release = Some((origin, PointerButton::Secondary, Modifiers::NONE));
+                    heard.wake(0.0);
+                    self.note(format!("finger held at {:.0}, {:.0}, then lifted: right click", origin.x, origin.y), heard);
+                } else {
+                    self.mode = Mode::Idle;
+                    out.push(Event::PointerGone);
+                    let why = if shifted { "after Shift clicks" } else { "taken back by the system" };
+                    self.note(format!("a held finger lifted {why}: nothing more done"), heard);
+                }
+            }
+            Mode::Held { finger, origin, tap: Some((other, from, since)), shifted } if other.id == id => {
+                heard.fingers = true;
+                let held = self.now - since;
+                let went = from.distance(at.unwrap_or(other.at));
+                if ended && went <= SLOP && (0.0..HOLD).contains(&held) {
+                    let shift = Modifiers::SHIFT;
+                    out.extend([Event::ModifiersChanged(shift), Event::PointerMoved(from), press_with(from, PointerButton::Primary, true, shift)]);
+                    self.release = Some((from, PointerButton::Primary, shift));
+                    heard.wake(0.0);
+                    self.mode = Mode::Held { finger, origin, tap: None, shifted: true };
+                    self.note(format!("Shift tap at {:.0}, {:.0} while a finger was held", from.x, from.y), heard);
+                } else {
+                    self.mode = Mode::Held { finger, origin, tap: None, shifted };
+                    out.push(Event::PointerGone);
+                    self.note("a second finger lifted, too slow or too far for a tap: nothing done".to_owned(), heard);
+                }
+            }
             _ => self.ignored.retain(|ignored| *ignored != id),
         }
     }
@@ -678,7 +848,8 @@ mod tests {
         let down = at(300.0, 400.0);
         let (heard, seen) = frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
         assert_eq!(seen, vec![Event::PointerMoved(down)], "no press until it is known to be a tap");
-        assert!(heard.fingers && heard.drag.is_none() && heard.wake.is_none());
+        assert!(heard.fingers && heard.drag.is_none());
+        assert_eq!(heard.wake, Some(HOLD), "looked at again when it would be a hold");
         // It wobbles less than the slop, and lifts a little way off.
         let (_, seen) = frame(&mut touches, 1.05, vec![finger(1, TouchPhase::Move, at(304.0, 403.0))]);
         assert_eq!(seen, vec![Event::PointerMoved(at(304.0, 403.0))]);
@@ -763,7 +934,8 @@ mod tests {
         frame(&mut touches, 1.02, vec![finger(1, TouchPhase::Move, far)]);
         frame(&mut touches, 1.04, vec![finger(1, TouchPhase::Move, at(302.0, 400.0))]);
         let (heard, seen) = frame(&mut touches, 1.2, vec![]);
-        assert!(seen.is_empty() && heard.drag.is_none() && heard.wake.is_none(), "{seen:?}");
+        assert!(seen.is_empty() && heard.drag.is_none(), "{seen:?}");
+        assert!(heard.wake.is_some_and(|wake| (wake - (HOLD - 0.2)).abs() < 1e-9), "only the hold is waited for: {:?}", heard.wake);
         let (_, seen) = frame(&mut touches, 1.3, vec![finger(1, TouchPhase::End, at(302.0, 400.0))]);
         assert_eq!(seen, vec![Event::PointerMoved(down), button(down, true)]);
     }
@@ -791,13 +963,154 @@ mod tests {
     }
 
     #[test]
-    fn a_finger_lifted_late_or_taken_back_clicks_nothing() {
+    fn a_finger_held_still_then_lifted_is_a_right_click_where_it_came_down() {
+        let mut touches = Touches::default();
+        let down = at(300.0, 400.0);
+        let (heard, _) = frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        assert!(heard.wake.is_some_and(|wake| (wake - HOLD).abs() < 1e-9), "woken when the hold is due: {:?}", heard.wake);
+        // A tremble within the slop is still holding.
+        let (heard, seen) = frame(&mut touches, 1.3, vec![finger(1, TouchPhase::Move, at(304.0, 402.0))]);
+        assert_eq!(pressed(&seen), 0);
+        assert!(heard.wake.is_some_and(|wake| wake <= HOLD - 0.3 + 1e-9));
+        // No input arrives; the wake comes and the finger is held, with nothing pressed yet.
+        let (heard, seen) = frame(&mut touches, 1.0 + HOLD, vec![]);
+        assert_eq!(pressed(&seen), 0, "{seen:?}");
+        assert_eq!(heard.held, Some(at(304.0, 402.0)));
+        assert!(heard.drag.is_none());
+        let (heard, _) = frame(&mut touches, 2.5, vec![]);
+        assert!(heard.held.is_some(), "held for as long as it stays");
+        // It lifts: the right button where it came down, its release a frame later.
+        let (heard, seen) = frame(&mut touches, 3.0, vec![finger(1, TouchPhase::End, at(304.0, 402.0))]);
+        assert_eq!(seen, vec![Event::PointerMoved(down), press(down, PointerButton::Secondary, true)]);
+        assert_eq!(heard.wake, Some(0.0));
+        let (_, seen) = frame(&mut touches, 3.02, vec![]);
+        assert_eq!(seen, vec![press(down, PointerButton::Secondary, false)]);
+        let (_, seen) = frame(&mut touches, 3.04, vec![]);
+        assert_eq!(seen, vec![Event::PointerGone]);
+        assert_eq!(touches.mode, Mode::Idle);
+    }
+
+    #[test]
+    fn taps_of_another_finger_while_one_is_held_are_shift_clicks_and_the_lift_is_then_nothing() {
+        let mut touches = Touches::default();
+        let (down, there, again) = (at(100.0, 900.0), at(500.0, 400.0), at(520.0, 380.0));
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        frame(&mut touches, 1.0 + HOLD, vec![]);
+        for (time, id, at) in [(2.0, 2, there), (3.0, 3, again)] {
+            let (_, seen) = frame(&mut touches, time, vec![finger(id, TouchPhase::Start, at)]);
+            assert_eq!(pressed(&seen), 0, "{seen:?}");
+            let (heard, seen) = frame(&mut touches, time + 0.1, vec![finger(id, TouchPhase::End, at)]);
+            assert_eq!(
+                seen,
+                vec![Event::ModifiersChanged(Modifiers::SHIFT), Event::PointerMoved(at), press_with(at, PointerButton::Primary, true, Modifiers::SHIFT)]
+            );
+            assert!(heard.held.is_some());
+            let (_, seen) = frame(&mut touches, time + 0.12, vec![]);
+            assert_eq!(seen, vec![press_with(at, PointerButton::Primary, false, Modifiers::SHIFT)], "Shift outlasts the release's frame");
+            let (_, seen) = frame(&mut touches, time + 0.14, vec![]);
+            assert_eq!(seen, vec![Event::PointerGone, Event::ModifiersChanged(Modifiers::NONE)]);
+        }
+        // The held finger lifts after Shift clicks: no right click.
+        let (_, seen) = frame(&mut touches, 4.0, vec![finger(1, TouchPhase::End, down)]);
+        assert_eq!(pressed(&seen), 0, "{seen:?}");
+        assert_eq!(touches.mode, Mode::Idle);
+    }
+
+    #[test]
+    fn a_second_fingers_tap_before_the_hold_is_a_shift_click_and_cancels_the_right_click() {
+        let mut touches = Touches::default();
+        let (down, there) = (at(100.0, 900.0), at(500.0, 400.0));
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        frame(&mut touches, 1.2, vec![finger(2, TouchPhase::Start, there)]);
+        let (heard, seen) = frame(&mut touches, 1.3, vec![finger(2, TouchPhase::End, there)]);
+        assert_eq!(
+            seen,
+            vec![
+                wheel(TouchPhase::End, Vec2::ZERO),
+                Event::ModifiersChanged(Modifiers::SHIFT),
+                Event::PointerMoved(there),
+                press_with(there, PointerButton::Primary, true, Modifiers::SHIFT),
+            ]
+        );
+        assert_eq!(heard.held, Some(down), "the first is held now");
+        frame(&mut touches, 1.32, vec![]);
+        frame(&mut touches, 1.34, vec![]);
+        // Another tap after the hold's time: Shift again.
+        frame(&mut touches, 2.0, vec![finger(3, TouchPhase::Start, there)]);
+        let (_, seen) = frame(&mut touches, 2.1, vec![finger(3, TouchPhase::End, there)]);
+        assert!(seen.contains(&Event::ModifiersChanged(Modifiers::SHIFT)), "{seen:?}");
+        frame(&mut touches, 2.12, vec![]);
+        // And the first lifts with no right click.
+        let (_, seen) = frame(&mut touches, 3.0, vec![finger(1, TouchPhase::End, down)]);
+        assert_eq!(pressed(&seen), 0, "{seen:?}");
+        // A second finger that comes down and lifts after the hold's time is no tap.
+        let mut touches = Touches::default();
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        frame(&mut touches, 1.2, vec![finger(2, TouchPhase::Start, there)]);
+        let (_, seen) = frame(&mut touches, 1.2 + HOLD + 0.1, vec![finger(2, TouchPhase::End, there)]);
+        assert_eq!(pressed(&seen), 0, "{seen:?}");
+    }
+
+    #[test]
+    fn a_second_finger_that_moves_while_one_is_held_pans_with_it() {
         let mut touches = Touches::default();
         let down = at(300.0, 400.0);
         frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
-        let (heard, seen) = frame(&mut touches, 1.0 + TAP + 0.1, vec![finger(1, TouchPhase::End, down)]);
-        assert_eq!(seen, vec![Event::PointerGone]);
-        assert!(heard.wake.is_none());
+        frame(&mut touches, 1.0 + HOLD, vec![]);
+        frame(&mut touches, 2.0, vec![finger(2, TouchPhase::Start, at(500.0, 400.0))]);
+        let (heard, seen) = frame(&mut touches, 2.1, vec![finger(2, TouchPhase::Move, at(540.0, 400.0))]);
+        assert!(heard.held.is_none());
+        assert_eq!(phases(&seen).first(), Some(&TouchPhase::Start), "{seen:?}");
+        assert!(matches!(touches.mode, Mode::Two { .. }));
+        let (_, seen) = frame(&mut touches, 2.2, vec![finger(2, TouchPhase::Move, at(580.0, 400.0))]);
+        assert!(scrolled(&seen).0.x > 0.0, "{seen:?}");
+        assert_eq!(pressed(&seen), 0);
+        // A held finger that slides off alone does nothing.
+        let mut touches = Touches::default();
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        frame(&mut touches, 1.0 + HOLD, vec![]);
+        let (heard, seen) = frame(&mut touches, 2.0, vec![finger(1, TouchPhase::Move, at(400.0, 400.0))]);
+        assert!(heard.held.is_none() && heard.drag.is_none() && pressed(&seen) == 0, "{seen:?}");
+        let (_, seen) = frame(&mut touches, 2.1, vec![finger(1, TouchPhase::End, at(400.0, 400.0))]);
+        assert_eq!(pressed(&seen), 0, "{seen:?}");
+    }
+
+    #[test]
+    fn a_finger_that_moves_or_lifts_before_the_hold_is_no_right_click() {
+        let secondary = |events: &[Event]| events.iter().any(|event| matches!(event, Event::PointerButton { button: PointerButton::Secondary, .. }));
+        let down = at(300.0, 400.0);
+        // Lifted just before: a click.
+        let mut touches = Touches::default();
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        let (_, seen) = frame(&mut touches, 1.0 + HOLD - 0.01, vec![finger(1, TouchPhase::End, down)]);
+        assert_eq!(pressed(&seen), 1);
+        assert!(!secondary(&seen));
+        // Moved past the slop first: a drag, however long it lasts.
+        let mut touches = Touches::default();
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        let (heard, _) = frame(&mut touches, 1.2, vec![finger(1, TouchPhase::Move, at(330.0, 400.0))]);
+        assert!(heard.drag.is_some());
+        let (_, seen) = frame(&mut touches, 2.0, vec![]);
+        assert!(!secondary(&seen), "{seen:?}");
+        // A second finger before the hold: two fingers, no right click.
+        let mut touches = Touches::default();
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        frame(&mut touches, 1.2, vec![finger(2, TouchPhase::Start, at(400.0, 400.0))]);
+        let (_, seen) = frame(&mut touches, 2.0, vec![]);
+        assert!(!secondary(&seen), "{seen:?}");
+        // The Pencil's tip before the hold: the tip's, no right click.
+        let mut touches = Touches::default();
+        frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, down)]);
+        let (_, seen) = frame(&mut touches, 1.2, vec![tip(2, TouchPhase::Start, at(500.0, 400.0))]);
+        assert!(!secondary(&seen));
+        let (_, seen) = frame(&mut touches, 2.0, vec![]);
+        assert!(!secondary(&seen), "{seen:?}");
+    }
+
+    #[test]
+    fn a_finger_taken_back_clicks_nothing() {
+        let mut touches = Touches::default();
+        let down = at(300.0, 400.0);
         frame(&mut touches, 3.0, vec![finger(2, TouchPhase::Start, down)]);
         let (_, seen) = frame(&mut touches, 3.1, vec![finger(2, TouchPhase::Cancel, down)]);
         assert_eq!(seen, vec![Event::PointerGone]);
@@ -925,7 +1238,9 @@ mod tests {
     fn after_two_fingers_the_one_left_does_nothing_until_a_second_joins_it_again() {
         let mut touches = Touches::default();
         frame(&mut touches, 1.0, vec![finger(1, TouchPhase::Start, at(400.0, 500.0)), finger(2, TouchPhase::Start, at(500.0, 500.0))]);
-        frame(&mut touches, 1.1, vec![finger(2, TouchPhase::End, at(500.0, 500.0))]);
+        // They pan (a still second finger lifted soon would be a Shift tap).
+        frame(&mut touches, 1.05, vec![finger(1, TouchPhase::Move, at(400.0, 530.0)), finger(2, TouchPhase::Move, at(500.0, 530.0))]);
+        frame(&mut touches, 1.1, vec![finger(2, TouchPhase::End, at(500.0, 530.0))]);
         // The one left moves a long way: no drag, no pointer.
         let (heard, seen) = frame(&mut touches, 1.2, vec![finger(1, TouchPhase::Move, at(600.0, 700.0))]);
         assert!(seen.is_empty(), "{seen:?}");
@@ -967,9 +1282,9 @@ mod tests {
         let (heard, seen) = frame(&mut touches, 1.0, vec![tip(7, TouchPhase::Start, down)]);
         assert_eq!(seen, vec![Event::PointerMoved(down), button(down, true)]);
         assert!(!heard.fingers && heard.drag.is_none() && heard.wake.is_none());
-        // No slop: a stroke begins where the tip lands.
+        // Within the dead zone the pointer stays where the tip came down.
         let (heard, seen) = frame(&mut touches, 1.01, vec![tip(7, TouchPhase::Move, on)]);
-        assert_eq!(seen, vec![Event::PointerMoved(on)]);
+        assert!(seen.is_empty(), "{seen:?}");
         assert!(!heard.fingers);
         assert_eq!(touches.readout(), vec!["touch: the Pencil's tip".to_owned()]);
         let (heard, seen) = frame(&mut touches, 1.3, vec![tip(7, TouchPhase::End, up)]);
@@ -985,6 +1300,36 @@ mod tests {
         assert_eq!(raw.events, vec![Event::PointerGone, Event::PointerMoved(hover)]);
         let (_, seen) = frame(&mut touches, 1.32, vec![]);
         assert!(seen.is_empty(), "{seen:?}");
+    }
+
+    #[test]
+    fn a_pencil_tip_that_slides_or_rests_within_its_dead_zone_moves_nothing_and_taps_where_it_came_down() {
+        let mut touches = Touches::default();
+        let down = at(200.0, 300.0);
+        frame(&mut touches, 1.0, vec![tip(7, TouchPhase::Start, down)]);
+        // It slides most of the dead zone and rests there far past egui's click time.
+        let slid = down + vec2(PENCIL_SLOP - 1.0, 0.0);
+        let (_, seen) = frame(&mut touches, 1.05, vec![tip(7, TouchPhase::Move, slid)]);
+        assert!(seen.is_empty(), "{seen:?}");
+        let (_, seen) = frame(&mut touches, 3.0, vec![tip(7, TouchPhase::Move, slid + vec2(0.0, 0.5))]);
+        assert!(seen.is_empty(), "a resting tip's tremor moves nothing: {seen:?}");
+        let (_, seen) = frame(&mut touches, 3.1, vec![tip(7, TouchPhase::End, slid)]);
+        assert_eq!(seen, vec![Event::PointerMoved(down), button(down, false)], "let go where it came down");
+    }
+
+    #[test]
+    fn a_pencil_tip_past_its_dead_zone_drags_from_the_tip_on() {
+        let mut touches = Touches::default();
+        let down = at(200.0, 300.0);
+        frame(&mut touches, 1.0, vec![tip(7, TouchPhase::Start, down)]);
+        let past = down + vec2(0.0, PENCIL_SLOP + 1.0);
+        let (_, seen) = frame(&mut touches, 1.05, vec![tip(7, TouchPhase::Move, past)]);
+        assert_eq!(seen, vec![Event::PointerMoved(past)], "it catches up at once");
+        // Back inside the circle it still follows: the dead zone is only the start's.
+        let (_, seen) = frame(&mut touches, 1.1, vec![tip(7, TouchPhase::Move, down)]);
+        assert_eq!(seen, vec![Event::PointerMoved(down)]);
+        let (_, seen) = frame(&mut touches, 1.2, vec![tip(7, TouchPhase::End, down + vec2(2.0, 0.0))]);
+        assert_eq!(seen, vec![Event::PointerMoved(down + vec2(2.0, 0.0)), button(down + vec2(2.0, 0.0), false)]);
     }
 
     #[test]
@@ -1121,7 +1466,7 @@ mod tests {
                 ..Default::default()
             };
             let heard = touches.frame(&mut raw);
-            assert!(heard.wake.is_none_or(|wake| (0.0..=SETTLE).contains(&wake)));
+            assert!(heard.wake.is_none_or(|wake| (0.0..=SETTLE.max(HOLD)).contains(&wake)));
             for event in &raw.events {
                 match event {
                     Event::PointerButton { pressed: true, .. } => down += 1,

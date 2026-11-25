@@ -7,10 +7,11 @@
 //! app's own Documents folder shows in the Files app. The settings are kept between runs.
 //!
 //! Fingers move the view and the Apple Pencil points ([`touch`]): one finger turns the model, two
-//! carry it and pinch to zoom, a finger's tap is a click, and the Pencil's tip is the mouse's left
-//! button. The Pencil's own gestures are tried out here too ([`pencil`]): a double tap on its side
-//! is Escape, a squeeze clicks where the tip hovered, and a held squeeze opens a ring of the keys
-//! a keyboard would give. A readout in the corner says what fingers and Pencil were heard doing.
+//! carry it and pinch to zoom, a finger's tap is a click, a finger held still is a right click,
+//! and the Pencil's tip is the mouse's left button. The Pencil's own gestures are tried out here
+//! too ([`pencil`]): a double tap on its side is Escape, a squeeze clicks where the tip hovered,
+//! and a held squeeze opens a ring of the keys a keyboard would give (its Right click makes the
+//! next click a right click). A readout in the corner says what fingers and Pencil were heard doing.
 //!
 //! Build for the simulator on Apple silicon with
 //! `cargo build -p solidcraft-ios --target aarch64-apple-ios-sim`, then wrap the binary in an app
@@ -67,6 +68,8 @@ mod ios {
 
     /// How far the ring's disc reaches past its keys.
     const RING_RIM: f32 = 6.0;
+    /// The radius of the ring marking a held finger, in points: wider than a fingertip.
+    const FINGER_MARK: f32 = 34.0;
 
     struct Shell {
         app: SolveApp,
@@ -121,7 +124,7 @@ mod ios {
             let tokens = solidcraft_theme::Tokens::get();
             if let Some(centre) = self.input.pencil.ring() {
                 let bounds = pencil::ring_bounds(centre);
-                let held = self.input.pencil.held();
+                let pencil = &self.input.pencil;
                 let mut pressed = None;
                 Container::new(ctx, Surface::Popup).area(egui::Id::unique("pencil-ring")).order(egui::Order::Foreground).fixed_pos(bounds.min).show(
                     ctx,
@@ -137,9 +140,9 @@ mod ios {
                             tokens.primary_border(tokens.dialog_border),
                         );
                         for (index, item) in pencil::ITEMS.iter().enumerate() {
-                            let on = item.holds().is_some_and(|modifier| held.contains(modifier));
+                            let on = pencil.is_on(*item);
                             // A dialog's controls on a dialog's body: the pair the theme draws
-                            // apart. A held modifier takes the selection's colours instead.
+                            // apart. A key that is on takes the selection's colours instead.
                             let key = egui::Button::new(item.label()).corner_radius(pencil::KEY_SIDE / 2.0);
                             let key = if on {
                                 key.selected(true)
@@ -162,7 +165,12 @@ mod ios {
 
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("pencil-readout")));
             let font = egui::FontId::proportional(13.0);
-            let held = pencil::held_label(self.input.pencil.held());
+            if let Some(at) = self.input.held {
+                // A held finger: a ring around it, outside the fingertip, and Shift beside it.
+                painter.circle_stroke(at, FINGER_MARK, egui::Stroke::new(3.0, tokens.accent));
+                painter.text(at + egui::vec2(0.0, -FINGER_MARK - 6.0), egui::Align2::CENTER_BOTTOM, "Shift", font.clone(), tokens.accent);
+            }
+            let held = self.input.pencil.held_text();
             if !held.is_empty()
                 && let Some(tip) = self.input.pencil.tip()
             {
