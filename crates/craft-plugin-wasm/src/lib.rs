@@ -28,11 +28,11 @@ impl Default for RuntimeOptions {
 /// it was already set. Anyone who can write to `dir` can change the machine code a plugin call
 /// runs, so it must be a folder only the user can write.
 pub fn set_compile_cache_dir(dir: Option<PathBuf>) -> bool {
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(target_os = "ios")))]
     {
         native::set_compile_cache_dir(dir)
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(target_os = "ios"))))]
     {
         let _ = dir;
         false
@@ -149,11 +149,11 @@ pub fn run_import<H: PluginHost + 'static>(
 /// Read and validate a panel plugin's static declarations with command and file authority disabled.
 /// The caller retains the host on failure as well as success.
 pub fn describe_ui<H: PluginHost + 'static>(host: H, manifest: &Manifest, component: &[u8]) -> (H, Result<craft_plugin::ui::Declarations>) {
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(target_os = "ios")))]
     {
         native::ui::describe(host, manifest, component, RuntimeOptions::default())
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(target_os = "ios"))))]
     {
         let _ = (manifest, component);
         (host, Err(craft_plugin::HostError::Trap { reason: "component execution requires an x86-64 or AArch64 native build".into() }))
@@ -170,11 +170,11 @@ pub fn run_ui_event<H: PluginHost + 'static>(
     params: &Value,
     event: &craft_plugin::ui::UiEvent,
 ) -> (H, Result<Value>) {
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(target_os = "ios")))]
     {
         native::run_call(host, manifest, component, entry, params, Some(event), RuntimeOptions::default())
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(target_os = "ios"))))]
     {
         let _ = (manifest, component, entry, params, event);
         (host, Err(craft_plugin::HostError::Trap { reason: "component execution requires an x86-64 or AArch64 native build".into() }))
