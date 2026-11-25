@@ -12,7 +12,9 @@
 //!   point before that. Until the click is delivered the app sees the pointer stay on that point;
 //! - a squeeze held for [`HOLD`] opens a ring of keys around that point, for what a keyboard does
 //!   on the desktop. Letting go over a key presses it, as a tap on it does. Shift and Ctrl stay
-//!   down for the next click or key only, since nothing can hold them down here.
+//!   down for the next click or key only, since nothing can hold them down here. Right click
+//!   makes the next click (the tip's, a finger's or a squeeze's) the right button's, which
+//!   opens the context menus.
 //!
 //! Nothing here is specific to iOS: it reads and writes egui's input only, so it is tested on any
 //! platform.
@@ -28,7 +30,7 @@ pub const LOOK_BACK: f64 = 0.08;
 /// Hover positions older than this (seconds) are forgotten, bar the newest of them.
 const REMEMBER: f64 = 1.0;
 /// From the ring's centre to the centre of each of its keys, in points.
-pub const RING_RADIUS: f32 = 92.0;
+pub const RING_RADIUS: f32 = 110.0;
 /// The side of a key of the ring, in points.
 pub const KEY_SIDE: f32 = 56.0;
 /// The ring's keys keep this far from the screen's edges, in points.
@@ -51,10 +53,11 @@ pub enum Item {
     Undo,
     Ctrl,
     Shift,
+    RightClick,
 }
 
 /// The ring's keys, clockwise from the top.
-pub const ITEMS: [Item; 8] = [Item::Enter, Item::Tab, Item::Delete, Item::Redo, Item::Escape, Item::Undo, Item::Ctrl, Item::Shift];
+pub const ITEMS: [Item; 9] = [Item::Enter, Item::Tab, Item::Delete, Item::Redo, Item::Escape, Item::Undo, Item::Ctrl, Item::Shift, Item::RightClick];
 
 const CTRL: Modifiers = Modifiers { alt: false, ctrl: true, shift: false, mac_cmd: false, command: true };
 
@@ -70,6 +73,7 @@ impl Item {
             Self::Undo => "Undo",
             Self::Ctrl => "Ctrl",
             Self::Shift => "Shift",
+            Self::RightClick => "Right\nclick",
         }
     }
 
@@ -91,7 +95,7 @@ impl Item {
             Self::Redo => Some((Key::Y, CTRL)),
             Self::Escape => Some((Key::Escape, Modifiers::NONE)),
             Self::Undo => Some((Key::Z, CTRL)),
-            Self::Ctrl | Self::Shift => None,
+            Self::Ctrl | Self::Shift | Self::RightClick => None,
         }
     }
 }
@@ -101,6 +105,8 @@ impl Item {
 pub enum Action {
     /// Press and release the primary button at a point.
     Click { at: Pos2, modifiers: Modifiers },
+    /// Press and release the secondary button at a point.
+    RightClick { at: Pos2, modifiers: Modifiers },
     /// Press and release a key.
     Key { key: Key, modifiers: Modifiers },
 }
@@ -110,13 +116,8 @@ impl Action {
     /// (`SolveApp::synthetic`): the modifiers, the press, the release, the modifiers let go.
     pub fn events(self) -> Vec<Event> {
         match self {
-            Self::Click { at, modifiers } => vec![
-                Event::ModifiersChanged(modifiers),
-                Event::PointerMoved(at),
-                Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers },
-                Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers },
-                Event::ModifiersChanged(Modifiers::NONE),
-            ],
+            Self::Click { at, modifiers } => click(at, PointerButton::Primary, modifiers),
+            Self::RightClick { at, modifiers } => click(at, PointerButton::Secondary, modifiers),
             Self::Key { key, modifiers } => vec![
                 Event::ModifiersChanged(modifiers),
                 Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers },
@@ -125,6 +126,18 @@ impl Action {
             ],
         }
     }
+}
+
+/// A click of `button` at `at` as input events: the modifiers, the press, the release, the
+/// modifiers let go.
+fn click(at: Pos2, button: PointerButton, modifiers: Modifiers) -> Vec<Event> {
+    vec![
+        Event::ModifiersChanged(modifiers),
+        Event::PointerMoved(at),
+        Event::PointerButton { pos: at, button, pressed: true, modifiers },
+        Event::PointerButton { pos: at, button, pressed: false, modifiers },
+        Event::ModifiersChanged(Modifiers::NONE),
+    ]
 }
 
 /// What [`Pencil::frame`] heard in a frame's input.
@@ -174,6 +187,10 @@ pub struct Pencil {
     held: Modifiers,
     /// The click the modifiers were held for has been made: let go at the next frame.
     let_go: bool,
+    /// The ring's Right click is on: the next click is the right button's.
+    right: bool,
+    /// A press was made the right button's: its release is too.
+    swapped: bool,
     /// The modifiers egui was last told are down.
     told: Modifiers,
     notes: VecDeque<String>,
@@ -246,7 +263,7 @@ impl Pencil {
                         events.push(Event::PointerGone);
                     }
                 }
-                Event::PointerButton { pos, button, pressed, modifiers } => {
+                Event::PointerButton { pos, mut button, pressed, modifiers } => {
                     if button == PointerButton::Primary {
                         self.down = pressed;
                     }
@@ -256,7 +273,18 @@ impl Pencil {
                             // A press elsewhere closes the ring, as it closes a menu.
                             self.ring = None;
                         }
-                    } else {
+                    }
+                    if button == PointerButton::Primary {
+                        if pressed && self.right && !self.on_ring {
+                            button = PointerButton::Secondary;
+                            self.right = false;
+                            self.swapped = true;
+                            self.note("right click".to_owned());
+                        } else if !pressed && std::mem::take(&mut self.swapped) {
+                            button = PointerButton::Secondary;
+                        }
+                    }
+                    if !pressed {
                         if !self.on_ring && !self.held.is_none() {
                             self.let_go = true;
                             heard.wake = Some(0.0);
@@ -306,6 +334,11 @@ impl Pencil {
             None => {
                 match item {
                     Item::Shift => self.held.shift = !self.held.shift,
+                    Item::RightClick => {
+                        self.right = !self.right;
+                        self.note(format!("ring: Right click {}", if self.right { "for the next click" } else { "off" }));
+                        return None;
+                    }
                     _ => {
                         let on = !self.held.ctrl;
                         self.held.ctrl = on;
@@ -325,8 +358,28 @@ impl Pencil {
     }
 
     /// The modifiers held down for the next click or key.
+    #[cfg(test)]
     pub fn held(&self) -> Modifiers {
         self.held
+    }
+
+    /// Whether a key of the ring is on: a modifier held, or Right click waiting for a click.
+    pub fn is_on(&self, item: Item) -> bool {
+        match item {
+            Item::RightClick => self.right,
+            _ => item.holds().is_some_and(|modifier| self.held.contains(modifier)),
+        }
+    }
+
+    /// What is on for the next click, by name ("Ctrl + Shift + Right click"); empty when nothing
+    /// is.
+    pub fn held_text(&self) -> String {
+        let held = held_label(self.held);
+        match (held.is_empty(), self.right) {
+            (_, false) => held,
+            (true, true) => "Right click".to_owned(),
+            (false, true) => format!("{held} + Right click"),
+        }
     }
 
     /// Where the tip hovers, if it is in range and not on the screen.
@@ -343,8 +396,8 @@ impl Pencil {
             (false, Some((_, at))) => format!("tip: hovering at {:.0}, {:.0}", at.x, at.y),
             (false, None) => "tip: out of range".to_owned(),
         });
-        if !self.held.is_none() {
-            lines.push(format!("held for the next click or key: {}", held_label(self.held)));
+        if !self.held.is_none() || self.right {
+            lines.push(format!("held for the next click or key: {}", self.held_text()));
         }
         lines.extend(self.notes.iter().cloned());
         lines
@@ -377,8 +430,9 @@ impl Pencil {
         // One layer at a time, as Escape does: the ring, then held modifiers, then the app.
         if self.ring.take().is_some() {
             self.note("double tap: ring closed".to_owned());
-        } else if !self.held.is_none() {
+        } else if !self.held.is_none() || self.right {
             self.held = Modifiers::NONE;
+            self.right = false;
             self.note("double tap: modifiers let go".to_owned());
         } else {
             heard.actions.push(Action::Key { key: Key::Escape, modifiers: Modifiers::NONE });
@@ -425,8 +479,10 @@ impl Pencil {
             }
             self.ring = None;
         }
-        heard.actions.push(Action::Click { at, modifiers: self.held });
-        self.note(format!("squeeze {lasted:.2} s: click at {:.0}, {:.0} (tip moved {:.1} pt meanwhile)", at.x, at.y, squeeze.drift));
+        let right = std::mem::take(&mut self.right);
+        heard.actions.push(if right { Action::RightClick { at, modifiers: self.held } } else { Action::Click { at, modifiers: self.held } });
+        let which = if right { "right click" } else { "click" };
+        self.note(format!("squeeze {lasted:.2} s: {which} at {:.0}, {:.0} (tip moved {:.1} pt meanwhile)", at.x, at.y, squeeze.drift));
         self.held = Modifiers::NONE;
         self.clicking = true;
     }
@@ -836,5 +892,46 @@ mod tests {
         assert_eq!(click.last(), Some(&Event::ModifiersChanged(Modifiers::NONE)));
         let escape = Action::Key { key: Key::Escape, modifiers: Modifiers::NONE }.events();
         assert_eq!(escape.iter().filter(|event| matches!(event, Event::Key { key: Key::Escape, .. })).count(), 2);
+    }
+
+    #[test]
+    fn the_rings_right_click_makes_the_next_tip_press_and_its_release_the_right_buttons() {
+        let mut pencil = Pencil::default();
+        assert!(pencil.press(Item::RightClick).is_none());
+        assert!(pencil.is_on(Item::RightClick));
+        assert_eq!(pencil.held_text(), "Right click");
+        let at = Pos2::new(400.0, 500.0);
+        let secondary = |events: &[Event], pressed: bool| {
+            events.iter().any(|event| matches!(event, Event::PointerButton { button: PointerButton::Secondary, pressed: p, .. } if *p == pressed))
+        };
+        let (_, seen) = frame(&mut pencil, 1.0, vec![Event::PointerMoved(at), button(at, true)], false);
+        assert!(secondary(&seen, true), "{seen:?}");
+        assert!(!pencil.is_on(Item::RightClick), "for one click only");
+        let (_, seen) = frame(&mut pencil, 1.1, vec![button(at, false)], false);
+        assert!(secondary(&seen, false), "its release is the right button's too: {seen:?}");
+        // The next is the left button's again.
+        let (_, seen) = frame(&mut pencil, 1.2, vec![button(at, true), button(at, false)], false);
+        assert!(!secondary(&seen, true) && !secondary(&seen, false), "{seen:?}");
+    }
+
+    #[test]
+    fn the_rings_right_click_makes_a_squeeze_a_right_click_and_a_double_tap_lets_it_go() {
+        let mut pencil = Pencil::default();
+        let at = Pos2::new(400.0, 500.0);
+        pencil.press(Item::RightClick);
+        frame(&mut pencil, 1.0, vec![Event::PointerMoved(at)], false);
+        frame(&mut pencil, 1.2, vec![key(SQUEEZE, true)], false);
+        let (heard, _) = frame(&mut pencil, 1.3, vec![key(SQUEEZE, false)], false);
+        assert_eq!(heard.actions, vec![Action::RightClick { at, modifiers: Modifiers::NONE }]);
+        assert!(!pencil.is_on(Item::RightClick));
+        // Off again by a double tap, before Escape.
+        pencil.press(Item::RightClick);
+        let (heard, _) = frame(&mut pencil, 2.0, vec![key(DOUBLE_TAP, true), key(DOUBLE_TAP, false)], false);
+        assert!(heard.actions.is_empty());
+        assert!(!pencil.is_on(Item::RightClick));
+        // A second press of the key turns it off too.
+        pencil.press(Item::RightClick);
+        pencil.press(Item::RightClick);
+        assert!(!pencil.is_on(Item::RightClick));
     }
 }
