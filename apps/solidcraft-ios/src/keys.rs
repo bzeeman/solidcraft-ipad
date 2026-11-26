@@ -19,6 +19,11 @@
 //! focus and its caret. The press is the key's: it types at once, and its release and any
 //! movement until then are dropped, so a slip of the tip types nothing else.
 //!
+//! With a physical keyboard connected none of this shows and the system's own handling stays (it
+//! raises no keyboard on the screen then), so the keys one types on are the ones under one's hands.
+//! The exception is a box the Pencil's tip tapped: a hand holding the Pencil is not at the keyboard,
+//! so that box gets our keys as if no keyboard were there.
+//!
 //! Nothing here is specific to iOS: it reads and writes egui's input only, so it is tested on any
 //! platform.
 
@@ -380,6 +385,10 @@ struct Drag {
 pub struct Keys {
     /// The box that had the focus when the app last drew, and what it has.
     field: Option<(Id, Choice)>,
+    /// The last press on the screen was the Pencil's tip, not a finger's ([`Keys::saw`]).
+    pencil_pressed: bool,
+    /// The box that has the focus took it from the Pencil's tip.
+    by_pencil: bool,
     /// What was drawn last frame: where this frame's presses land.
     shown: Option<Shown>,
     /// Where the handle left the pad and the keyboard (see [`Layout::place`]).
@@ -393,6 +402,16 @@ pub struct Keys {
 }
 
 impl Keys {
+    /// Notes whose the presses in a frame's input are, before the touches are turned into the
+    /// pointer: a touch that reports a force is the Pencil's (a finger's reports none).
+    pub fn saw(&mut self, raw: &egui::RawInput) {
+        for event in &raw.events {
+            if let Event::Touch { phase: egui::TouchPhase::Start, force, .. } = event {
+                self.pencil_pressed = force.is_some();
+            }
+        }
+    }
+
     /// Takes the presses on the keys out of a frame's input and puts in what they type, and moves
     /// the keys while their handle is dragged. Returns whether the keys need drawing again.
     pub fn input(&mut self, raw: &mut egui::RawInput) -> bool {
@@ -452,9 +471,10 @@ impl Keys {
     }
 
     /// Decides what shows this frame, after the app has drawn: `field` is the text box that has
-    /// the focus, if one does, and `names` the design's parameters. Returns what to draw, and
-    /// whether the system's keyboard may come up (it may only when ours are not showing).
-    pub fn frame(&mut self, field: Option<Field>, names: Vec<String>, content: Rect) -> (Option<&Shown>, bool) {
+    /// the focus, if one does, `names` the design's parameters, and `hardware` whether a physical
+    /// keyboard is connected. Returns what to draw, and whether the system's keyboard may come up
+    /// (it may only when ours are not showing).
+    pub fn frame(&mut self, field: Option<Field>, names: Vec<String>, content: Rect, hardware: bool) -> (Option<&Shown>, bool) {
         let Some(field) = field else {
             (self.field, self.shown, self.shift) = (None, None, false);
             return (None, true);
@@ -463,10 +483,15 @@ impl Keys {
             Some((id, choice)) if id == field.id => choice,
             _ => {
                 self.shift = false;
+                self.by_pencil = self.pencil_pressed;
                 Choice::Ours(if field.expression { Layout::Pad } else { Layout::Letters })
             }
         };
         self.field = Some((field.id, choice));
+        if hardware && !self.by_pencil {
+            self.shown = None;
+            return (None, true);
+        }
         self.shown = Some(match choice {
             Choice::System(layout) => {
                 let back = back_key(field.rect, content);
@@ -530,7 +555,7 @@ mod tests {
     }
 
     fn shown(keys: &mut Keys, field: Option<Field>, names: &[&str]) -> Shown {
-        let (shown, _) = keys.frame(field, names.iter().map(|s| (*s).to_owned()).collect(), CONTENT);
+        let (shown, _) = keys.frame(field, names.iter().map(|s| (*s).to_owned()).collect(), CONTENT, false);
         shown.cloned().expect("keys show")
     }
 
@@ -674,7 +699,7 @@ mod tests {
         assert_eq!(after.outline.min, before.outline.min + (to - grip));
 
         // Another box, even after the focus left: the keyboard is where the handle put it.
-        keys.frame(None, Vec::new(), CONTENT);
+        keys.frame(None, Vec::new(), CONTENT, false);
         let other = shown(&mut keys, text("search", field_at(900.0, 100.0)), &[]);
         assert_eq!(other.outline.min, after.outline.min);
         // The pad keeps its own place, beside the box.
@@ -693,11 +718,11 @@ mod tests {
     fn full_brings_the_system_keyboard_for_that_box_and_the_key_beside_it_takes_it_away() {
         let mut keys = Keys::default();
         let field = expression("box", field_at(400.0, 300.0));
-        let (_, system) = keys.frame(field, Vec::new(), CONTENT);
+        let (_, system) = keys.frame(field, Vec::new(), CONTENT, false);
         assert!(!system, "ours stand in for the system's keyboard");
         let pad = shown(&mut keys, field, &[]);
         run(&mut keys, tap(at(&pad, Key::Full)));
-        let (back, system) = keys.frame(field, Vec::new(), CONTENT);
+        let (back, system) = keys.frame(field, Vec::new(), CONTENT, false);
         assert!(system);
         let back = back.cloned().expect("the key beside the box shows");
         assert!(!back.ours());
@@ -705,22 +730,55 @@ mod tests {
         assert!(!back.outline.intersects(field_at(400.0, 300.0)));
 
         // Another box gets ours again; so does the first once it has lost the focus.
-        assert!(!keys.frame(text("other", field_at(400.0, 300.0)), Vec::new(), CONTENT).1);
-        assert!(!keys.frame(field, Vec::new(), CONTENT).1, "the system's keyboard was for that focus only");
+        assert!(!keys.frame(text("other", field_at(400.0, 300.0)), Vec::new(), CONTENT, false).1);
+        assert!(!keys.frame(field, Vec::new(), CONTENT, false).1, "the system's keyboard was for that focus only");
 
         run(&mut keys, tap(at(&pad, Key::Full)));
-        keys.frame(field, Vec::new(), CONTENT);
+        keys.frame(field, Vec::new(), CONTENT, false);
         run(&mut keys, tap(back.outline.center()));
-        assert!(!keys.frame(field, Vec::new(), CONTENT).1, "the key beside the box brought the pad back");
+        assert!(!keys.frame(field, Vec::new(), CONTENT, false).1, "the key beside the box brought the pad back");
     }
 
     #[test]
     fn without_a_text_box_the_keys_take_nothing() {
         let mut keys = Keys::default();
-        let (shown, system) = keys.frame(None, vec!["width".into()], CONTENT);
+        let (shown, system) = keys.frame(None, vec!["width".into()], CONTENT, false);
         assert!(shown.is_none());
         assert!(system);
         assert_eq!(run(&mut keys, tap(pos2(500.0, 320.0))).len(), 3);
+    }
+
+    fn touch_down(keys: &mut Keys, pencil: bool) {
+        let event = Event::Touch {
+            device_id: egui::TouchDeviceId(0),
+            id: egui::TouchId(1),
+            phase: egui::TouchPhase::Start,
+            pos: pos2(450.0, 310.0),
+            force: pencil.then_some(0.4),
+        };
+        keys.saw(&egui::RawInput { events: vec![event], ..Default::default() });
+    }
+
+    #[test]
+    fn a_physical_keyboard_takes_over_unless_the_pencil_tapped_the_box() {
+        let mut keys = Keys::default();
+        let rect = field_at(400.0, 300.0);
+        // A finger taps a box with a keyboard connected: nothing of ours, the system's handling.
+        touch_down(&mut keys, false);
+        let (shown, system) = keys.frame(expression("box", rect), Vec::new(), CONTENT, true);
+        assert!(shown.is_none() && system);
+        assert_eq!(run(&mut keys, tap(pos2(560.0, 320.0))).len(), 3, "presses beside the box are the app's");
+
+        // The Pencil taps another box: our keys, keyboard or not, for as long as it has the focus.
+        touch_down(&mut keys, true);
+        let (shown, system) = keys.frame(text("name", rect), Vec::new(), CONTENT, true);
+        assert!(shown.is_some_and(Shown::ours) && !system);
+        touch_down(&mut keys, false);
+        assert!(keys.frame(text("name", rect), Vec::new(), CONTENT, true).0.is_some(), "a later finger changes nothing");
+
+        // Without a keyboard a finger's box gets our keys as before.
+        let (shown, system) = keys.frame(expression("other", rect), Vec::new(), CONTENT, false);
+        assert!(shown.is_some() && !system);
     }
 
     #[test]

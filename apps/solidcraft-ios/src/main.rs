@@ -27,6 +27,8 @@
 mod bookmarks;
 #[cfg(target_os = "ios")]
 mod documents;
+#[cfg(target_os = "ios")]
+mod hardware;
 #[cfg(any(target_os = "ios", test))]
 mod input;
 #[cfg(any(target_os = "ios", test))]
@@ -42,7 +44,7 @@ mod ios {
     use solidcraft_ui_egui::ui_kit::{Container, Surface};
     use solidcraft_ui_egui::{Services, SolveApp};
 
-    use crate::{documents, input, keys, pencil};
+    use crate::{documents, hardware, input, keys, pencil};
 
     /// The scene's depth and stencil, as in the desktop app.
     const DEPTH_BITS: u8 = 24;
@@ -97,7 +99,8 @@ mod ios {
             let field = ctx.memory(|m| m.focused()).zip(rect).map(|(id, rect)| keys::Field { id, rect, expression: expression == Some(id) });
             let names = if field.is_some_and(|f| f.expression) { solidcraft_ui_egui::params_dialog::parameter_names(ctx) } else { Vec::new() };
             let lit = self.keys.lit(ctx.input(|i| i.time));
-            let (shown, system) = self.keys.frame(field, names, ctx.content_rect());
+            let hardware = field.is_some() && hardware::keyboard_connected();
+            let (shown, system) = self.keys.frame(field, names, ctx.content_rect(), hardware);
             if !system {
                 // egui-winit raises the system's keyboard while a frame asks for text input.
                 ctx.output_mut(|o| o.ime = None);
@@ -227,6 +230,7 @@ mod ios {
         }
 
         fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+            self.keys.saw(raw);
             self.input.frame(&mut self.app, ctx.content_rect(), raw);
             if self.keys.input(raw) {
                 ctx.request_repaint();
