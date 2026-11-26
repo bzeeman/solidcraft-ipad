@@ -13,6 +13,10 @@
 //! and a held squeeze opens a ring of the keys a keyboard would give (its Right click makes the
 //! next click a right click). A readout in the corner says what fingers and Pencil were heard doing.
 //!
+//! Text boxes get keys of our own instead of the system's keyboard ([`keys`]): a number pad beside
+//! an expression box, a compact keyboard for any other, each dragged where one wants it by its
+//! handle; Full on either brings up the system's whole keyboard.
+//!
 //! Build for the simulator on Apple silicon with
 //! `cargo build -p solidcraft-ios --target aarch64-apple-ios-sim`, then wrap the binary in an app
 //! bundle with `packaging/ios/bundle.sh` (the simulator needs no code signature). For a real iPad
@@ -26,7 +30,7 @@ mod documents;
 #[cfg(any(target_os = "ios", test))]
 mod input;
 #[cfg(any(target_os = "ios", test))]
-mod numpad;
+mod keys;
 #[cfg(any(target_os = "ios", test))]
 mod pencil;
 #[cfg(any(target_os = "ios", test))]
@@ -38,7 +42,7 @@ mod ios {
     use solidcraft_ui_egui::ui_kit::{Container, Surface};
     use solidcraft_ui_egui::{Services, SolveApp};
 
-    use crate::{documents, input, numpad, pencil};
+    use crate::{documents, input, keys, pencil};
 
     /// The scene's depth and stencil, as in the desktop app.
     const DEPTH_BITS: u8 = 24;
@@ -76,41 +80,48 @@ mod ios {
         frames: u32,
         /// The Pencil, the fingers and what they do to a frame's input before the app reads it.
         input: input::Input,
-        /// The number pad that stands in for the system's keyboard in expression boxes.
-        pad: numpad::Pad,
+        /// Our number pad and compact keyboard, which stand in for the system's keyboard.
+        keys: keys::Keys,
     }
 
     impl Shell {
-        /// The number pad beside the expression box that has the focus, or the 123 key beside a
-        /// box that has the system's keyboard instead. Runs after the app has drawn, so the box
-        /// and where it is are this frame's; while the pad shows, the system's keyboard stays down.
-        fn number_pad(&mut self, ctx: &egui::Context) {
+        /// Our keys for the text box that has the focus: the number pad for an expression box, the
+        /// compact keyboard for any other, or the key beside a box that has the system's keyboard
+        /// instead. Runs after the app has drawn, so the box and where it is are this frame's; while
+        /// our keys show, the system's keyboard stays down.
+        fn text_keys(&mut self, ctx: &egui::Context) {
             let tokens = solidcraft_theme::Tokens::get();
             let rect = ctx.output(|o| o.ime.as_ref().map(|ime| ime.rect));
-            let field = solidcraft_ui_egui::params_dialog::focused_expression(ctx).zip(rect);
-            let names = if field.is_some() { solidcraft_ui_egui::params_dialog::parameter_names(ctx) } else { Vec::new() };
-            let now = ctx.input(|i| i.time);
-            let lit = self.pad.lit(now);
-            let (shown, keyboard) = self.pad.frame(field, names, ctx.content_rect());
-            if !keyboard {
+            let expression = solidcraft_ui_egui::params_dialog::focused_expression(ctx);
+            let field = ctx.memory(|m| m.focused()).zip(rect).map(|(id, rect)| keys::Field { id, rect, expression: expression == Some(id) });
+            let names = if field.is_some_and(|f| f.expression) { solidcraft_ui_egui::params_dialog::parameter_names(ctx) } else { Vec::new() };
+            let lit = self.keys.lit(ctx.input(|i| i.time));
+            let (shown, system) = self.keys.frame(field, names, ctx.content_rect());
+            if !system {
                 // egui-winit raises the system's keyboard while a frame asks for text input.
                 ctx.output_mut(|o| o.ime = None);
             }
             let Some(shown) = shown else { return };
-            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("number-pad")));
-            if shown.keys.len() > 1 {
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::unique("text-keys")));
+            if shown.ours() {
                 painter.rect(shown.outline, 10.0, tokens.dialog_body, tokens.primary_border(tokens.dialog_border), egui::StrokeKind::Outside);
             }
             for (rect, key) in &shown.keys {
+                if *key == keys::Key::Handle {
+                    // A short bar in the middle of the handle's strip says it can be taken hold of.
+                    let bar = egui::Rect::from_center_size(rect.center(), egui::vec2(44.0, 5.0));
+                    painter.rect_filled(bar, 2.5, tokens.text_dim);
+                    continue;
+                }
                 let label = match key {
-                    numpad::Key::Name(index) => shown.names.get(*index).map(String::as_str).unwrap_or_default(),
-                    other => other.label(),
+                    keys::Key::Name(index) => shown.names.get(*index).cloned().unwrap_or_default(),
+                    other => other.label(shown.shift),
                 };
-                let on = lit.is_some_and(|(k, _)| k == *key);
+                let on = lit.is_some_and(|(k, _)| k == *key) || (*key == keys::Key::Shift && shown.shift);
                 let (fill, ink) = if on { (tokens.accent, tokens.on_accent) } else { (tokens.control_fill, tokens.text) };
                 painter.rect(*rect, 8.0, fill, tokens.control_border_stroke(tokens.control_border), egui::StrokeKind::Inside);
-                let size = if matches!(key, numpad::Key::Type(_)) { 22.0 } else { 15.0 };
-                let galley = painter.layout(label.to_owned(), egui::FontId::proportional(size), ink, rect.width() - 8.0);
+                let size = if key.types() { 21.0 } else { 15.0 };
+                let galley = painter.layout(label, egui::FontId::proportional(size), ink, rect.width() - 8.0);
                 let at = rect.center() - galley.size() / 2.0;
                 painter.with_clip_rect(rect.shrink(2.0)).galley(at, galley, ink);
             }
@@ -216,7 +227,7 @@ mod ios {
 
         fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
             self.input.frame(&mut self.app, ctx.content_rect(), raw);
-            if self.pad.input(raw) {
+            if self.keys.input(raw) {
                 ctx.request_repaint();
             }
             self.app.raw_input_hook(raw);
@@ -229,7 +240,7 @@ mod ios {
             let above = egui::Rect::from_min_max(ui.max_rect().min, egui::pos2(ui.max_rect().right(), content.top()));
             ui.painter().rect_filled(above, 0.0, solidcraft_theme::Tokens::get().app_bar);
             ui.scope_builder(egui::UiBuilder::new().max_rect(content), |ui| self.app.ui(ui));
-            self.number_pad(ui.ctx());
+            self.text_keys(ui.ctx());
             self.pencil_ui(ui.ctx());
         }
 
@@ -326,7 +337,7 @@ mod ios {
                 app.cam.set_view(solidcraft_viewport::StandardView::Iso);
                 app.fit_view();
                 log::info!(target: "solidcraft_ios", "app created");
-                Ok(Box::new(Shell { app, frames: 0, input: input::Input::from_env(), pad: numpad::Pad::default() }))
+                Ok(Box::new(Shell { app, frames: 0, input: input::Input::from_env(), keys: keys::Keys::default() }))
             }),
         );
         if let Err(e) = result {
