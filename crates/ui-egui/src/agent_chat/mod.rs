@@ -643,6 +643,11 @@ pub struct AgentChat {
     login_results: std::collections::HashMap<String, bool>,
     /// Desktop host hook: start the endpoint on demand.
     pub control_starter: Option<ControlStarter>,
+    /// Host hook where no helper process can start (iPadOS): SolidCraft's MCP server in this
+    /// process, for endpoint agents. Its requests pass the same gate as the endpoint's.
+    pub in_process_tools: Option<backend::InProcessStarter>,
+    /// The running agent's tools are the in-process server's.
+    tools_in_process: bool,
     /// The picker is unfolded (it folds to one line once an agent is connected).
     picking: Option<bool>,
     /// This launch connects the agent started last once the installed agents are known ([`begin`]).
@@ -714,6 +719,7 @@ impl AgentChat {
         std::mem::swap(&mut self.following_document, &mut other.following_document);
         std::mem::swap(&mut self.settings, &mut other.settings);
         std::mem::swap(&mut self.control_starter, &mut other.control_starter);
+        std::mem::swap(&mut self.in_process_tools, &mut other.in_process_tools);
         std::mem::swap(&mut self.models_cache, &mut other.models_cache);
         std::mem::swap(&mut self.window_placed, &mut other.window_placed);
         std::mem::swap(&mut self.connect_at_start, &mut other.connect_at_start);
@@ -837,7 +843,9 @@ impl AgentChat {
     /// `solidcraft-cli` was not found (as the notice `connect` posts says), or it was found but
     /// its tools did not start (an endpoint agent whose MCP start failed; the error is in the chat).
     pub(crate) fn no_design_hint(&self) -> &'static str {
-        if self.tools_port.is_none() {
+        if self.tools_in_process {
+            tr("ui.agent_chat_tools_not_started")
+        } else if self.tools_port.is_none() {
             tr("ui.agent_chat_no_control")
         } else if self.tools_bridged {
             tr("ui.agent_chat_tools_not_started")
@@ -1311,8 +1319,29 @@ pub fn connect(app: &mut SolveApp, ctx: &egui::Context) {
             chat.tools_tx = Some(tx);
         }
     }
-    let cli = find_cli();
-    if chat.tools_port.is_none() {
+    // No helper process can start here (iPadOS): an endpoint agent gets the tools in process,
+    // through a gate channel of their own (no port).
+    let endpoint = matches!(entry.kind, agents::Kind::Api | agents::Kind::Anthropic);
+    let in_process = match chat.in_process_tools.as_mut() {
+        Some(start) if endpoint && chat.tools_port.is_none() => {
+            let tx = match &chat.tools_tx {
+                Some(tx) => tx.clone(),
+                None => {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    chat.tools_rx = Some(rx);
+                    chat.tools_tx = Some(tx.clone());
+                    tx
+                }
+            };
+            Some(start(tx))
+        }
+        _ => None,
+    };
+    chat.tools_in_process = in_process.is_some();
+    let cli = if in_process.is_some() { None } else { find_cli() };
+    if in_process.is_some() {
+        // Nothing to find: the tools run in this process.
+    } else if chat.tools_port.is_none() {
         chat.notice(tr("ui.agent_chat_no_control"), true);
     } else if cli.is_none() {
         chat.notice(tr("ui.agent_chat_no_cli"), true);
@@ -1323,10 +1352,10 @@ pub fn connect(app: &mut SolveApp, ctx: &egui::Context) {
         chat.notice(hint, true);
     }
     let bridge = cli.zip(chat.tools_port).map(|(cli, port)| acp::McpBridge { cli, port });
-    chat.tools_available = Some(bridge.is_some());
-    chat.tools_bridged = bridge.is_some();
+    chat.tools_available = Some(bridge.is_some() || in_process.is_some());
+    chat.tools_bridged = bridge.is_some() || in_process.is_some();
     let wake = ctx.clone();
-    let start = backend::StartContext { cwd: working_dir(), bridge, tools: chat.tools_tx.clone(), wake: Box::new(move || wake.request_repaint()) };
+    let start = backend::StartContext { cwd: working_dir(), bridge, tools: chat.tools_tx.clone(), in_process, wake: Box::new(move || wake.request_repaint()) };
     let started: Result<Box<dyn ChatBackend>, String> = match entry.kind {
         agents::Kind::Acp if entry.argv.is_empty() => Err(tr("ui.agent_chat_none_found").to_string()),
         agents::Kind::Acp => acp_client::AcpBackend::start(&entry.argv, start).map(|b| Box::new(b) as Box<dyn ChatBackend>),

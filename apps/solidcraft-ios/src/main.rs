@@ -23,6 +23,8 @@
 //! the target is `aarch64-apple-ios` (`bundle.sh --device`), and the bundle must then be signed.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+#[cfg(target_os = "ios")]
+mod agent;
 #[cfg(any(target_os = "ios", test))]
 mod bookmarks;
 #[cfg(target_os = "ios")]
@@ -42,7 +44,7 @@ mod ios {
     use solidcraft_ui_egui::ui_kit::{Container, Surface};
     use solidcraft_ui_egui::{Services, SolveApp};
 
-    use crate::{documents, input, keys, pencil};
+    use crate::{agent, documents, input, keys, pencil};
 
     /// The scene's depth and stencil, as in the desktop app.
     const DEPTH_BITS: u8 = 24;
@@ -298,7 +300,11 @@ mod ios {
                 solidcraft_ui_egui::fonts::setup_bundled_fonts(&cc.egui_ctx);
                 let mut services = Services::default();
                 documents::install(&mut services, &cc.egui_ctx);
+                // The agent chat's endpoint agents: their model requests, and SolidCraft's tools in
+                // this process (iPadOS starts no helper).
+                services.agent_http = Some(std::sync::Arc::new(agent::http));
                 let mut app = Box::new(SolveApp::new(Session::default(), services));
+                app.agent_chat.in_process_tools = Some(agent::starter());
                 // The settings of the last run, before the iPad's own choices below override any.
                 if let Some(stored) = cc.storage.and_then(|s| solidcraft_ui_egui::prefs::stored(|k| s.get_string(k))) {
                     app.load_prefs(&stored);

@@ -129,9 +129,27 @@ pub struct StartContext {
     pub bridge: Option<super::acp::McpBridge>,
     /// Where tool calls run in process go, for backends that run their own tool loop.
     pub tools: Option<std::sync::mpsc::Sender<crate::ControlRequest>>,
+    /// SolidCraft's MCP server in this process, for a backend that runs its own tool loop where
+    /// no helper process can start (iPadOS): used when [`Self::bridge`] is `None`.
+    pub in_process: Option<InProcessStart>,
     /// Wakes the window when something arrives.
     pub wake: Box<dyn Fn() + Send + Sync>,
 }
+
+/// SolidCraft's MCP server running in the app's own process: JSON-RPC lines in, at most one line
+/// out (a notification gets none). Its tool calls reach the window as control requests through the
+/// chat's gate, as the helper's do through the chat's endpoint.
+pub trait InProcessTools {
+    fn handle_line(&mut self, line: &str) -> Option<String>;
+}
+
+/// Builds the in-process server on the backend's worker thread (the server need not be `Send`).
+/// It gets the backend's Stop flag, so a call waiting on the window can give up.
+pub type InProcessStart = Box<dyn FnOnce(std::sync::Arc<std::sync::atomic::AtomicBool>) -> Box<dyn InProcessTools> + Send>;
+
+/// The host's in-process MCP server (iPadOS): given where the chat's gate reads tool requests, the
+/// server to start a backend with.
+pub type InProcessStarter = Box<dyn FnMut(std::sync::mpsc::Sender<crate::ControlRequest>) -> InProcessStart>;
 
 /// A chat backend. Methods never block the frame; replies arrive through [`ChatBackend::poll`].
 pub trait ChatBackend {

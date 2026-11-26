@@ -50,3 +50,9 @@ objc2-ui-kit = { version = "0.3", default-features = false, features = ["std", "
 # The vendored winit (patched in the workspace), for the files the system hands the app.
 winit = { version = "0.30", default-features = false }
 objc2-uniform-type-identifiers = { version = "0.3", default-features = false, features = ["std", "UTType"] }
+# The agent chat: SolidCraft's MCP server in the app's own process (iPadOS starts no helper), and
+# HTTP for its endpoint agents, as the desktop app sends it (rustls, the system's certificates).
+solidcraft-mcp = { workspace = true }
+solidcraft-control = { workspace = true }
+ureq = { version = "3.4", default-features = false, features = ["rustls-no-provider", "platform-verifier"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

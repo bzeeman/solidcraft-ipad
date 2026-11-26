@@ -18,7 +18,7 @@ use serde_json::{Map, Value, json};
 use super::MODEL_LIST_CAP;
 use super::acp::ModelInfo;
 use super::agents::Protocol;
-use super::backend::{ChatBackend, Event, HttpFn, HttpRequest, PromptPart, StartContext, ToolStatus};
+use super::backend::{ChatBackend, Event, HttpFn, HttpRequest, InProcessTools, PromptPart, StartContext, ToolStatus};
 use super::process::{AgentProcess, FromAgent, ProcessHandle};
 
 /// Longest tool result handed back to the model.
@@ -757,15 +757,20 @@ impl ApiBackend {
             None => None,
         };
         let handle = mcp.as_ref().map(AgentProcess::handle);
+        // Or SolidCraft's tools in this process (iPadOS, which starts no helper): built on the
+        // worker thread, where every call to them runs.
+        let in_process = if mcp.is_none() { ctx.in_process } else { None };
         let (cmd_tx, cmd_rx) = channel::<Cmd>();
         let (ev_tx, events) = channel::<Event>();
         let cancel = Arc::new(AtomicBool::new(false));
         let stop = cancel.clone();
         let wake: Arc<dyn Fn() + Send + Sync> = Arc::from(ctx.wake);
         std::thread::spawn(move || {
+            let local = in_process.map(|start| start(stop.clone()));
             let mut w = Worker {
                 cfg,
                 mcp,
+                local,
                 next: 0,
                 tools: Vec::new(),
                 tool_names: Vec::new(),
@@ -847,6 +852,8 @@ impl Drop for ApiBackend {
 struct Worker {
     cfg: ApiConfig,
     mcp: Option<AgentProcess>,
+    /// SolidCraft's MCP server in this process, when there is no helper process.
+    local: Option<Box<dyn InProcessTools>>,
     next: u64,
     /// The MCP tools in the endpoint's own shape (function tools, or `input_schema` tools).
     tools: Vec<Value>,
@@ -936,6 +943,9 @@ impl Worker {
 
     /// One MCP request to the server; its `result`.
     fn mcp_call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        if self.local.is_some() {
+            return self.local_call(method, params);
+        }
         let Some(m) = self.mcp.as_ref() else { return Err("no SolidCraft tools in this session".into()) };
         self.next += 1;
         let id = self.next;
@@ -966,16 +976,35 @@ impl Worker {
         }
     }
 
+    /// One MCP request to the in-process server; its `result`. It runs on this thread, and
+    /// waits while the window serves the control requests it makes.
+    fn local_call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        let Some(l) = self.local.as_mut() else { return Err("no SolidCraft tools in this session".into()) };
+        self.next += 1;
+        let id = self.next;
+        let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string();
+        let Some(reply) = l.handle_line(&line) else { return Err("the SolidCraft tools did not answer".into()) };
+        let v = serde_json::from_str::<Value>(reply.trim()).map_err(|e| format!("the SolidCraft tools answered badly: {e}"))?;
+        if let Some(e) = v.get("error") {
+            return Err(e.get("message").and_then(Value::as_str).unwrap_or("error").to_string());
+        }
+        Ok(v.get("result").cloned().unwrap_or(Value::Null))
+    }
+
     fn start_mcp(&mut self) -> Result<(), String> {
-        if self.mcp.is_none() {
+        if self.mcp.is_none() && self.local.is_none() {
             return Ok(());
         }
         self.mcp_call(
             "initialize",
             json!({"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "solidcraft-agent-chat", "version": env!("CARGO_PKG_VERSION")}}),
         )?;
+        let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
         if let Some(m) = &self.mcp {
-            m.send(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+            m.send(&initialized);
+        }
+        if let Some(l) = self.local.as_mut() {
+            let _ = l.handle_line(&initialized.to_string());
         }
         self.refresh_tools()
     }
@@ -983,7 +1012,7 @@ impl Worker {
     /// Lists the tools again, so a plugin installed, enabled or removed since the last turn is
     /// offered (or no longer offered) from the next turn on. Both lists change together.
     fn refresh_tools(&mut self) -> Result<(), String> {
-        if self.mcp.is_none() {
+        if self.mcp.is_none() && self.local.is_none() {
             return Ok(());
         }
         let list = self.mcp_call("tools/list", json!({}))?;
@@ -2176,7 +2205,7 @@ mod tests {
             reasoning_effort: String::new(),
             openai_responses: false,
         };
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut b = ApiBackend::start(cfg, ctx).unwrap();
         b.prompt(&[PromptPart::Text("measure it".into())]);
         let events = wait_for_turn(&mut b);
@@ -2229,7 +2258,7 @@ mod tests {
             reasoning_effort: String::new(),
             openai_responses: false,
         };
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut b = ApiBackend::start(cfg, ctx).unwrap();
         let wait = |b: &mut ApiBackend, events: &mut Vec<Event>| {
             let start = std::time::Instant::now();
@@ -2293,7 +2322,7 @@ mod tests {
             reasoning_effort: String::new(),
             openai_responses: false,
         };
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut b = ApiBackend::start(cfg, ctx).unwrap();
         for text in ["one", "two"] {
             b.prompt(&[PromptPart::Text(text.into())]);
@@ -2364,7 +2393,7 @@ mod tests {
             reasoning_effort: String::new(),
             openai_responses: false,
         };
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut b = ApiBackend::start(cfg, ctx).unwrap();
         let run = |b: &mut ApiBackend, f: &dyn Fn(&mut ApiBackend), want: usize| {
             f(b);
@@ -2417,7 +2446,7 @@ mod tests {
             reasoning_effort: String::new(),
             openai_responses: false,
         };
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut b = ApiBackend::start(cfg, ctx).unwrap();
         let mut events = Vec::new();
         let start = std::time::Instant::now();
@@ -2507,7 +2536,7 @@ mod tests {
     }
 
     fn go_ctx() -> StartContext {
-        StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) }
+        StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) }
     }
 
     /// Wait until a scripted endpoint saw a request (ten seconds at most).
@@ -2956,7 +2985,7 @@ mod tests {
             reasoning_effort: String::new(),
             openai_responses: false,
         };
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut b = ApiBackend::start(cfg, ctx).unwrap();
         let mut events = Vec::new();
         let start = std::time::Instant::now();
@@ -3101,7 +3130,7 @@ mod tests {
             reasoning_effort: String::new(),
             openai_responses: false,
         };
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut b = ApiBackend::start(cfg, ctx).unwrap();
         b.prompt(&[PromptPart::Text("go".into())]);
         let events = wait_for_turn(&mut b);
@@ -3144,7 +3173,7 @@ mod tests {
             reasoning_effort: String::new(),
             openai_responses: false,
         };
-        let context = || StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let context = || StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         assert!(ApiBackend::start(config(false, Protocol::OpenAi), context()).is_err());
         assert!(ApiBackend::start(config(true, Protocol::Anthropic), context()).is_err());
         assert!(seen.lock().unwrap().is_empty(), "refusal must happen before any HTTP request");
@@ -3193,6 +3222,7 @@ mod tests {
         let w = Worker {
             cfg,
             mcp: None,
+            local: None,
             next: 0,
             tools: vec![json!({"type": "function", "function": {"name": "measure"}})],
             tool_names: vec!["measure".into()],
@@ -3483,7 +3513,7 @@ mod tests {
             reasoning_effort: String::new(),
             openai_responses: false,
         };
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut b = ApiBackend::start(cfg, ctx).unwrap();
         b.prompt(&[PromptPart::Text("look closer".into())]);
         let events = wait_for_turn(&mut b);
@@ -3535,7 +3565,7 @@ mod tests {
             reasoning_effort: String::new(),
             openai_responses: false,
         };
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut b = ApiBackend::start(cfg, ctx).unwrap();
         b.prompt(&[PromptPart::Text("measure it".into())]);
         let events = wait_for_turn(&mut b);
@@ -3588,7 +3618,7 @@ mod tests {
             reasoning_effort: String::new(),
             openai_responses: false,
         };
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut b = ApiBackend::start(cfg, ctx).unwrap();
         for n in 1..=3 {
             b.prompt(&[PromptPart::Text(format!("look {n}")), PromptPart::Image { mime: "image/png".into(), base64: format!("V{n}") }]);

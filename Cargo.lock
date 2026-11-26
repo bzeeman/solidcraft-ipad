@@ -6428,12 +6428,16 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "objc2-ui-kit 0.3.2",
  "objc2-uniform-type-identifiers 0.3.2",
+ "rustls",
  "serde",
  "serde_json",
+ "solidcraft-control",
  "solidcraft-engine",
+ "solidcraft-mcp",
  "solidcraft-theme",
  "solidcraft-ui-egui",
  "solidcraft-viewport",
+ "ureq",
  "winit",
 ]
 

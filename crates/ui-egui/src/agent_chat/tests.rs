@@ -1761,7 +1761,7 @@ while IFS= read -r line; do
 done
 "#;
     let argv = vec!["sh".to_string(), "-c".to_string(), script.to_string(), "fake-agent".to_string(), log.to_string_lossy().into_owned()];
-    let start = backend::StartContext { cwd: dir.clone(), bridge: None, tools: None, wake: Box::new(|| {}) };
+    let start = backend::StartContext { cwd: dir.clone(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
     let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
     app.agent_chat.backend = Some(Box::new(acp_client::AcpBackend::start(&argv, start).unwrap()));
     app.agent_chat.state = Some(State::Starting);
@@ -1881,7 +1881,7 @@ while IFS= read -r line; do
 done
 "#;
     let argv = vec!["sh".to_string(), "-c".to_string(), script.to_string(), "fake-agent".to_string(), log.to_string_lossy().into_owned()];
-    let start = backend::StartContext { cwd: dir.clone(), bridge: None, tools: None, wake: Box::new(|| {}) };
+    let start = backend::StartContext { cwd: dir.clone(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
     let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
     app.agent_chat.backend = Some(Box::new(acp_client::AcpBackend::start(&argv, start).unwrap()));
     app.agent_chat.state = Some(State::Starting);
@@ -1944,7 +1944,7 @@ done
 "#;
     let argv = vec!["sh".to_string(), "-c".to_string(), script.to_string(), "fake-agent".to_string(), log.to_string_lossy().into_owned()];
     let bridge = acp::McpBridge { cli: dir.join("solidcraft-cli"), port: 7878 };
-    let start = backend::StartContext { cwd: dir.clone(), bridge: Some(bridge.clone()), tools: None, wake: Box::new(|| {}) };
+    let start = backend::StartContext { cwd: dir.clone(), bridge: Some(bridge.clone()), tools: None, in_process: None, wake: Box::new(|| {}) };
     let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
     app.agent_chat.backend = Some(Box::new(acp_client::AcpBackend::start(&argv, start).unwrap()));
     app.agent_chat.state = Some(State::Starting);
@@ -2050,6 +2050,90 @@ fn custom_instructions_reach_the_system_note_of_each_new_session() {
     let notes: Vec<Value> = seen.lock().unwrap().iter().map(|body| body["messages"][0]["content"].clone()).collect();
     assert_eq!(notes, [acp::system_note("Use M3 screws."), acp::system_note("Use M3 screws."), acp::system_note("Print flat side down.")]);
     disconnect(&mut h.app);
+}
+
+/// SolidCraft's MCP server inside the app (iPadOS starts no helper process): an endpoint agent
+/// gets its tools from the host's in-process server, whose tool calls reach the design through
+/// the chat's gate as the helper's do, with no control port and no `solidcraft-cli`.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn an_endpoint_agent_drives_the_design_through_in_process_tools() {
+    /// A stand-in for the host's MCP server: `execute` sends its command to the gate and waits.
+    struct Fake {
+        tx: Sender<ControlRequest>,
+    }
+    impl backend::InProcessTools for Fake {
+        fn handle_line(&mut self, line: &str) -> Option<String> {
+            let v: Value = serde_json::from_str(line).ok()?;
+            let id = v.get("id")?.clone();
+            let result = match v["method"].as_str()? {
+                "initialize" => json!({"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}}),
+                "tools/list" => json!({"tools": [{"name": "execute", "description": "run a command", "inputSchema": {"type": "object"}}]}),
+                "tools/call" => {
+                    let args = &v["params"]["arguments"];
+                    let (req, reply) = ControlRequest::new("engine.execute", json!({"command": args["command"], "params": args["params"]}));
+                    self.tx.send(req).ok()?;
+                    let r = reply.recv_timeout(std::time::Duration::from_secs(10)).ok()?;
+                    json!({"content": [{"type": "text", "text": r.to_string()}], "isError": r["ok"] != true})
+                }
+                _ => json!({}),
+            };
+            Some(json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string())
+        }
+    }
+    let rounds = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let log = rounds.clone();
+    let http: backend::HttpFn = Arc::new(move |r: &backend::HttpRequest| {
+        if !r.url.ends_with("/chat/completions") {
+            return Ok((200, b"{\"data\":[]}".to_vec()));
+        }
+        let body: Value = serde_json::from_slice(r.body.as_deref().unwrap_or(b"null")).unwrap();
+        let mut log = log.lock().unwrap();
+        log.push(body);
+        let message = if log.len() == 1 {
+            let arguments = boxed(0.0).to_string();
+            json!({"role": "assistant", "content": null, "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "execute", "arguments": arguments}}]})
+        } else {
+            json!({"role": "assistant", "content": "Made a box."})
+        };
+        Ok((200, json!({"choices": [{"message": message}]}).to_string().into_bytes()))
+    });
+    let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services { agent_http: Some(http), ..Default::default() });
+    app.preferences.ai_features = true;
+    app.preferences.ai_permissions = agents::Mode::All;
+    app.agent_chat.in_process_tools = Some(Box::new(|tx| Box::new(move |_cancel| Box::new(Fake { tx }) as Box<dyn backend::InProcessTools>)));
+    app.preferences.agents.push(agents::AgentConfig {
+        id: "api-1".into(),
+        kind: agents::Kind::Api,
+        base_url: "http://localhost:11434/v1".into(),
+        model: "m".into(),
+        ..Default::default()
+    });
+    app.agent_chat.agent_id = Some("api-1".into());
+    let ctx = crate::fonts::test_context();
+    let until = |app: &mut SolveApp, done: &dyn Fn(&SolveApp) -> bool| {
+        let t = std::time::Instant::now();
+        while !done(app) {
+            assert!(t.elapsed() < std::time::Duration::from_secs(20), "timed out");
+            poll(app, &ctx);
+            app.drain_control(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+    connect(&mut app, &ctx);
+    until(&mut app, &|a| a.agent_chat.state() == State::Ready);
+    assert_eq!(app.agent_chat.tools_available, Some(true), "the in-process tools count as the design's tools");
+    assert_eq!(app.agent_chat.tools_port, None, "no control port was opened");
+    let before = app.session.doc.features.len();
+    send(&mut app, &ctx, "make a box".into());
+    let done = rounds.clone();
+    until(&mut app, &move |a| a.agent_chat.state() == State::Ready && done.lock().unwrap().len() == 2);
+    assert_eq!(app.session.doc.features.len(), before + 1, "the agent's box is in the design");
+    let tools = &rounds.lock().unwrap()[0]["tools"];
+    assert_eq!(tools[0]["function"]["name"], "execute", "the model was offered the in-process tools: {tools}");
+    let answer = rounds.lock().unwrap()[1]["messages"].as_array().unwrap().iter().find(|m| m["role"] == "tool").cloned().unwrap();
+    assert!(answer["content"].to_string().contains("ok"), "the tool's answer went back to the model: {answer}");
+    disconnect(&mut app);
 }
 
 fn models_reply(current: &str) -> Event {
@@ -2868,6 +2952,7 @@ done
         cwd: dir.clone(),
         bridge: None,
         tools: None,
+        in_process: None,
         wake: Box::new(move || {
             let _ = wake_tx.send(());
         }),
@@ -3038,7 +3123,7 @@ while IFS= read -r line; do
 done
 "#;
     let argv = vec!["sh".to_string(), "-c".to_string(), script.to_string(), "fake-agent".to_string(), log.to_string_lossy().into_owned()];
-    let start = backend::StartContext { cwd: dir.clone(), bridge: None, tools: None, wake: Box::new(|| {}) };
+    let start = backend::StartContext { cwd: dir.clone(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
     let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
     app.agent_chat.backend = Some(Box::new(acp_client::AcpBackend::start(&argv, start).unwrap()));
     app.agent_chat.state = Some(State::Starting);
@@ -3095,7 +3180,7 @@ while IFS= read -r line; do
 done
 "#;
     let argv = vec!["sh".to_string(), "-c".to_string(), script.to_string(), "fake-agent".to_string(), log.to_string_lossy().into_owned()];
-    let start = backend::StartContext { cwd: dir.clone(), bridge: None, tools: None, wake: Box::new(|| {}) };
+    let start = backend::StartContext { cwd: dir.clone(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
     let mut app = SolveApp::new(solidcraft_engine::Session::default(), crate::Services::default());
     app.agent_chat.backend = Some(Box::new(acp_client::AcpBackend::start(&argv, start).unwrap()));
     app.agent_chat.state = Some(State::Starting);

@@ -519,7 +519,7 @@ while IFS= read -r line; do
 done
 "#;
         let argv = vec!["sh".into(), "-c".into(), script.into(), "fake-agent".into(), log.to_string_lossy().into_owned()];
-        let ctx = StartContext { cwd: dir.clone(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: dir.clone(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut backend = AcpBackend::start(&argv, ctx).unwrap();
         let ready = |backend: &mut AcpBackend| {
             let deadline = Instant::now() + Duration::from_secs(20);
@@ -552,7 +552,7 @@ done
     }
 
     fn ready_backend() -> Result<AcpBackend, String> {
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut backend = AcpBackend::start(&["sh".into(), "-c".into(), "cat >/dev/null".into()], ctx)?;
         let mut events = Vec::new();
         backend.handle(Incoming::Reply { id: 1, result: Ok(json!({"agentInfo":{"name":"fake"}})) }, &mut events);
@@ -698,7 +698,7 @@ done
 
     #[test]
     fn config_updates_and_replies_are_isolated_to_the_active_session() {
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut backend = AcpBackend::start(&["sh".into(), "-c".into(), "cat >/dev/null".into()], ctx).unwrap();
         let mut events = Vec::new();
         backend.handle(Incoming::Reply { id: 1, result: Ok(json!({"agentInfo":{"name":"fake"}})) }, &mut events);
@@ -738,7 +738,7 @@ done
     /// A refused model is the picker's business, not an error of the chat; signing in stays as it was.
     #[test]
     fn a_refused_model_is_reported_as_such() {
-        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, wake: Box::new(|| {}) };
+        let ctx = StartContext { cwd: std::env::temp_dir(), bridge: None, tools: None, in_process: None, wake: Box::new(|| {}) };
         let mut backend = AcpBackend::start(&["sh".into(), "-c".into(), "cat >/dev/null".into()], ctx).unwrap();
         let mut events = Vec::new();
         backend.handle(Incoming::Reply { id: 1, result: Ok(json!({"agentInfo":{"name":"fake"}})) }, &mut events);

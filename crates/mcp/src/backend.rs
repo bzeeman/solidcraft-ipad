@@ -1,6 +1,8 @@
 //! Where MCP tool calls end up: a control-channel method call (`docs/control-protocol.md`).
 
 #[cfg(not(target_arch = "wasm32"))]
+mod channel;
+#[cfg(not(target_arch = "wasm32"))]
 mod remote;
 
 use serde_json::{Value, json};
@@ -70,6 +72,8 @@ pub(crate) use solidcraft_control::STILL_RUNNING;
 
 #[cfg(test)]
 pub(crate) use remote::Waits;
+#[cfg(not(target_arch = "wasm32"))]
+pub use channel::Channel;
 #[cfg(not(target_arch = "wasm32"))]
 pub use remote::{Auto, Remote};
 

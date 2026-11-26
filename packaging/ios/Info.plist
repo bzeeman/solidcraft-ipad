@@ -31,10 +31,10 @@
   </array>
   <key>DTPlatformName</key>
   <string>@PLATFORM_NAME@</string>
-  <!-- The app has no encryption in it: `cargo tree` of solidcraft-ios for aarch64-apple-ios
-       lists no TLS or cipher crate, only hashing. That is what this key states, and without it
-       TestFlight holds every build until the question is answered by hand. Look again when the
-       iPad app gains a dependency that encrypts. -->
+  <!-- The app's only encryption is HTTPS (rustls) for the agent chat's model requests: standard
+       encryption for an ordinary purpose, which Apple exempts. That is what this key states, and
+       without it TestFlight holds every build until the question is answered by hand. Look again
+       when the iPad app gains any other encryption. -->
   <key>ITSAppUsesNonExemptEncryption</key>
   <false/>
   <key>LSRequiresIPhoneOS</key>
@@ -110,6 +110,10 @@
       </dict>
     </dict>
   </array>
+  <!-- The agent chat's model can be on a computer on the same network (LM Studio or Ollama on a
+       Mac): iPadOS asks before an app reaches the local network, with this reason. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>SolidCraft's assistant talks to a language model running on a computer on your network.</string>
   <key>UIApplicationSupportsIndirectInputEvents</key>
   <true/>
   <key>UISupportedInterfaceOrientations</key>

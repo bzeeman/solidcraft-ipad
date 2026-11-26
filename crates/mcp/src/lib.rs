@@ -21,6 +21,8 @@ mod tools;
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::Auto;
 pub use backend::Backend;
+#[cfg(not(target_arch = "wasm32"))]
+pub use backend::Channel;
 pub use backend::Headless;
 #[cfg(not(target_arch = "wasm32"))]
 pub use backend::Remote;
