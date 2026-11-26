@@ -156,6 +156,9 @@ impl Input {
         }
         self.finger_drag(app, touched.drag, touched.taken_back);
         self.held = touched.held;
+        if touched.tip_not_still {
+            solidcraft_ui_egui::select_other::not_still(app);
+        }
         self.pencil.fingers(touched.fingers);
         self.demo_input(content, raw);
         let ring = self.pencil.ring().is_some();
@@ -411,6 +414,78 @@ mod tests {
         }
         assert_eq!(h.app.session.selection.len(), 1, "{:?}", h.app.session.selection);
         assert!(h.ctx.input(|i| i.pointer.latest_pos().is_none()), "the pointer has left the screen with the tip");
+    }
+
+    /// A grounded base and a free 10 mm cube beside it, seen from the top; the free part's
+    /// occurrence.
+    fn two_parts() -> (Harness, u64) {
+        let mut h = Harness::new();
+        h.app.home.open = false;
+        let mut free = 0;
+        for (name, corner) in [("Base", [-5, -5, 0]), ("Free", [20, 0, 0])] {
+            h.app.session.execute("component.activate", &serde_json::json!({"component": "root"})).unwrap();
+            free = h.app.session.execute("component.create", &serde_json::json!({"name": name})).unwrap()["occurrence"].as_u64().unwrap();
+            h.app.session.execute("solid.box", &serde_json::json!({"length": 10, "width": 10, "height": 10, "corner": corner})).unwrap();
+        }
+        h.app.session.execute("component.activate", &serde_json::json!({"component": "root"})).unwrap();
+        h.call("ui.view", serde_json::json!({"view": "top"}));
+        h.app.cam.distance = 200.0;
+        h.frames(3);
+        (h, free)
+    }
+
+    fn origin_of(h: &Harness, occurrence: u64) -> [f64; 3] {
+        let w = h.app.session.occurrence_placement(&[occurrence]).unwrap().world;
+        [w[3][0], w[3][1], w[3][2]]
+    }
+
+    fn screen_of(h: &mut Harness, p: [f64; 3]) -> Pos2 {
+        let [x, y] = h.at(&serde_json::json!({"world": p})).unwrap();
+        Pos2::new(x as f32, y as f32)
+    }
+
+    /// Drag a free part with the Pencil's tip from its top face 30 mm along, in `steps` frames
+    /// after resting `rest` frames, as the window layer reports a stroke: a touch and its pointer
+    /// each frame. Where the part's origin ends up.
+    fn pencil_drag(rest: usize, steps: usize) -> [f64; 3] {
+        let (mut h, free) = two_parts();
+        let mut input = Input::default();
+        let mut time = 10.0;
+        let (a, b) = (screen_of(&mut h, [25.0, 5.0, 10.0]), screen_of(&mut h, [25.0, 35.0, 10.0]));
+        let tip = |phase: TouchPhase, at: Pos2| Event::Touch { device_id: TouchDeviceId(0), id: TouchId(9), phase, pos: at, force: Some(0.4) };
+        frame(&mut h, &mut input, &mut time, vec![tip(TouchPhase::Start, a), Event::PointerMoved(a), pencil_button(a, true)]);
+        for _ in 0..rest {
+            let at = a + vec2(0.3, 0.0);
+            frame(&mut h, &mut input, &mut time, vec![tip(TouchPhase::Move, at), Event::PointerMoved(at)]);
+        }
+        for k in 1..=steps {
+            let at = a + (b - a) * (k as f32 / steps as f32);
+            frame(&mut h, &mut input, &mut time, vec![tip(TouchPhase::Move, at), Event::PointerMoved(at)]);
+        }
+        frame(&mut h, &mut input, &mut time, vec![tip(TouchPhase::End, b), pencil_button(b, false), Event::PointerGone]);
+        for _ in 0..3 {
+            frame(&mut h, &mut input, &mut time, Vec::new());
+        }
+        origin_of(&h, free)
+    }
+
+    /// Past its dead zone the Pencil's tip drags a free part, quickly or slowly: a tip that
+    /// takes longer than the hold for Select Other (0.5 s) or egui's press-and-hold (0.8 s) to
+    /// creep through its dead zone is still a drag (on the iPad no slow drag moved a part).
+    #[test]
+    fn the_pencils_tip_drags_a_free_part_past_its_dead_zone_quickly_or_slowly() {
+        for steps in [60, 600] {
+            let o = pencil_drag(0, steps);
+            assert!((o[1] - 30.0).abs() < 1.0 && o[0].abs() < 1.0, "in {steps} frames the part followed the tip: {o:?}");
+        }
+    }
+
+    /// A tip held still opens the list of what is under it, as a mouse's held button does, and
+    /// moves nothing.
+    #[test]
+    fn a_pencil_tip_held_still_moves_no_part() {
+        let o = pencil_drag(90, 60);
+        assert!(o.iter().all(|x| x.abs() < 1e-9), "{o:?}");
     }
 
     /// A finger as the window layer reports it.
