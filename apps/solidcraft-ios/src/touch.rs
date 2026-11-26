@@ -41,6 +41,7 @@
 //! in the frame of the release, and a tap on the model then selected nothing.)
 //!
 //! A touch is the Pencil's when it reports a force: an iPad's screen measures none for fingers.
+//! Only fingers' touches stay in the input; the tip's go (see [`Touches::frame`]).
 //!
 //! Nothing here is specific to iOS: it reads and writes egui's input only, so it is tested on any
 //! platform.
@@ -76,6 +77,10 @@ const MAX_ZOOM_STEP: f32 = 2.0;
 /// 3 mm on the 13-inch iPad (264 pixels per inch, 2 pixels a point). Ben chose a bigger dead
 /// zone for the tip, 2026-11-25, after it moved parts by accident.
 pub const PENCIL_SLOP: f32 = 16.0;
+/// egui's click distance (points): a press that has gone further is not held still. The app's
+/// hold for the list of everything under the pointer (Select Other) goes by it, so a tip that
+/// creeps further within its dead zone must say so ([`Heard::tip_not_still`]).
+pub const STILL: f32 = 6.0;
 /// The dead touches remembered at once; a stream that never lifts them loses the oldest.
 const MAX_IGNORED: usize = 16;
 /// The readout keeps this many of the latest gestures.
@@ -131,6 +136,9 @@ pub struct Heard {
     pub notes: Vec<String>,
     /// A finger is held (see [`HOLD`]) here: taps of another are Shift clicks.
     pub held: Option<Pos2>,
+    /// The Pencil's tip is down and has gone more than [`STILL`] from where it came down,
+    /// though the pointer may not show it yet (its dead zone): the press is no still hold.
+    pub tip_not_still: bool,
 }
 
 impl Heard {
@@ -165,7 +173,17 @@ pub struct Touches {
 
 impl Default for Touches {
     fn default() -> Self {
-        Self { mode: Mode::Idle, pencil: None, tip_origin: None, ignored: Vec::new(), release: None, gone: false, unshift: false, notes: VecDeque::new(), now: 0.0 }
+        Self {
+            mode: Mode::Idle,
+            pencil: None,
+            tip_origin: None,
+            ignored: Vec::new(),
+            release: None,
+            gone: false,
+            unshift: false,
+            notes: VecDeque::new(),
+            now: 0.0,
+        }
     }
 }
 
@@ -233,7 +251,8 @@ fn point(out: &mut Out, at: Pos2) {
 impl Touches {
     /// Read one frame's input before anything else does: the pointer the window layer made of
     /// the touches goes out, and the one described in the module's notes comes in. The touches
-    /// themselves stay in the input (egui scrolls a list by a drag only once it has seen one).
+    /// of fingers stay in the input (egui scrolls a list by a drag only once it has seen one);
+    /// the Pencil's go.
     pub fn frame(&mut self, raw: &mut egui::RawInput) -> Heard {
         let now = raw.time.filter(|time| time.is_finite()).unwrap_or(self.now);
         self.now = now;
@@ -270,7 +289,14 @@ impl Touches {
             };
             if let Some((touch, phase, pencil)) = touch {
                 emulated = true;
-                out.pass(event);
+                // The tip's own touches stay out of egui: it treats a touch held still for its
+                // click time (0.8 s) as a press-and-hold for a context menu, and that takes the
+                // press's drag away. A tip that rests, or creeps through its dead zone slower
+                // than that, then never dragged anything. Without them the tip is a mouse's
+                // button, and a long press is a drag that the dead zone holds still.
+                if !(pencil || self.pencil.is_some_and(|tip| tip.id == touch.id)) {
+                    out.pass(event);
+                }
                 self.touch(touch, phase, pencil, &mut out, &mut heard);
             } else if emulated && matches!(event, Event::PointerMoved(_) | Event::PointerButton { .. } | Event::PointerGone) {
                 // Ours replaces it.
@@ -283,6 +309,7 @@ impl Touches {
         if let Mode::Held { finger, .. } = self.mode {
             heard.held = Some(finger.at);
         }
+        heard.tip_not_still = self.pencil.is_some_and(|tip| self.tip_origin.is_none_or(|origin| origin.distance(tip.at) > STILL));
         if out.let_go {
             // The click is read where the pointer is: it stays for this frame.
             self.gone = true;
@@ -1306,11 +1333,15 @@ mod tests {
     fn a_pencil_tip_that_slides_or_rests_within_its_dead_zone_moves_nothing_and_taps_where_it_came_down() {
         let mut touches = Touches::default();
         let down = at(200.0, 300.0);
-        frame(&mut touches, 1.0, vec![tip(7, TouchPhase::Start, down)]);
+        let (heard, _) = frame(&mut touches, 1.0, vec![tip(7, TouchPhase::Start, down)]);
+        assert!(!heard.tip_not_still);
+        let (heard, seen) = frame(&mut touches, 1.02, vec![tip(7, TouchPhase::Move, down + vec2(STILL - 1.0, 0.0))]);
+        assert!(!heard.tip_not_still && seen.is_empty(), "a tremor is still");
         // It slides most of the dead zone and rests there far past egui's click time.
         let slid = down + vec2(PENCIL_SLOP - 1.0, 0.0);
         let (_, seen) = frame(&mut touches, 1.05, vec![tip(7, TouchPhase::Move, slid)]);
         assert!(seen.is_empty(), "{seen:?}");
+        assert!(touches.frame(&mut egui::RawInput { time: Some(1.06), ..Default::default() }).tip_not_still, "it crept past egui's click distance");
         let (_, seen) = frame(&mut touches, 3.0, vec![tip(7, TouchPhase::Move, slid + vec2(0.0, 0.5))]);
         assert!(seen.is_empty(), "a resting tip's tremor moves nothing: {seen:?}");
         let (_, seen) = frame(&mut touches, 3.1, vec![tip(7, TouchPhase::End, slid)]);

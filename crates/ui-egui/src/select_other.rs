@@ -554,6 +554,13 @@ pub fn track_hold(
     consumed || opened
 }
 
+/// The press being held is not still after all, though the pointer has not moved: the iPad
+/// shell keeps the Pencil tip's first few points of travel from the pointer (its dead zone), and
+/// a tip creeping through them is a drag beginning, not a hold asking for the list.
+pub fn not_still(app: &mut SolveApp) {
+    app.viewport.select_other.hold = None;
+}
+
 /// The popup belongs to the focused modeling view. Other views have their own canvas feedback.
 fn active_popup(app: &SolveApp) -> Option<&Popup> {
     if app.viewport.card || crate::render_workspace::active(app) {
