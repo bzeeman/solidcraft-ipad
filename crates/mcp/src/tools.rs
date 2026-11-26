@@ -730,10 +730,12 @@ struct Expect {
 }
 
 impl Expect {
-    /// The tool's `expect` argument: `None` when it was not given. A malformed one is refused
-    /// before the call runs, so a typo never builds a design that then goes unchecked.
+    /// The tool's `expect` argument: `None` when it was not given, or given empty (`{}` asks for
+    /// nothing: smaller models fill every optional object, then loop on a refusal). A malformed
+    /// one is refused before the call runs, so a typo never builds a design that then goes
+    /// unchecked.
     fn parse(a: &Map<String, Value>) -> Result<Option<Expect>, String> {
-        let Some(v) = a.get("expect").filter(|v| !v.is_null()) else { return Ok(None) };
+        let Some(v) = a.get("expect").filter(|v| !v.is_null() && v.as_object().is_none_or(|o| !o.is_empty())) else { return Ok(None) };
         let Some(o) = v.as_object() else { return Err("expect: must be an object {volume_mm3?, tol?, bodies?, bbox?}".into()) };
         if let Some(k) = o.keys().find(|k| !["volume_mm3", "tol", "bodies", "bbox"].contains(&k.as_str())) {
             let k: String = k.chars().take(64).collect();

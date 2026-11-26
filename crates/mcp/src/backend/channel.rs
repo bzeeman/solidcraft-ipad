@@ -116,12 +116,14 @@ mod tests {
     fn calls_go_to_the_window_and_back() {
         let (tx, rx) = std::sync::mpsc::channel::<ControlRequest>();
         let window = std::thread::spawn(move || {
+            // Requests held unanswered (dropping one would close its reply).
+            let mut held = Vec::new();
             for req in rx {
                 match req.method.as_str() {
                     "engine.execute" => {
                         let _ = req.reply.send(json!({"ok": true, "result": {"ran": req.params["command"]}}));
                     }
-                    "ui.view" => {} // never answered
+                    "ui.view" => held.push(req),
                     _ => {
                         let _ = req.reply.send(json!({"ok": false, "error": format!("unknown method {}", req.method)}));
                     }
@@ -131,7 +133,7 @@ mod tests {
         let mut b = Channel::new(tx).with_wait(Duration::from_millis(200));
         assert_eq!(b.call("engine.execute", json!({"command": "solid.box"})), Ok(json!({"ran": "solid.box"})));
         assert!(b.call("document.nothing", json!({})).is_err_and(|e| e.starts_with("unknown method")));
-        assert!(b.call("ui.view", json!({})).is_err_and(|e| e.starts_with(super::super::STILL_RUNNING)));
+        assert!(b.call("ui.view", json!({})).is_err_and(|e| e.starts_with(super::super::STILL_RUNNING)), "an unanswered call ends its wait");
         assert_eq!(b.call("control.running", json!({})), Ok(json!({"running": []})));
         assert_eq!(b.app_options(), Ok(None));
         drop(b);

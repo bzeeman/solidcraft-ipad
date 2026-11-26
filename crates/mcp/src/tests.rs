@@ -1868,7 +1868,7 @@ fn a_malformed_expect_is_refused_before_anything_runs() {
         }
         // An object the tool can't use: a tool error naming the key, and nothing was run.
         for (bad, says) in [
-            (json!({}), "nothing to check"),
+            (json!({"tol": 0.01}), "nothing to check"),
             (json!({"volume": 24000}), "unknown key `volume`"),
             (json!({"volume_mm3": "24000"}), "`volume_mm3` must be a number"),
             (json!({"volume_mm3": -1}), "`volume_mm3` must not be negative"),
@@ -1889,6 +1889,15 @@ fn a_malformed_expect_is_refused_before_anything_runs() {
         assert_eq!(tool(&mut s, "measure", json!({}))["body_count"], 0, "{name}: nothing ran");
         assert_eq!(tool(&mut s, "inspect_design", json!({"measure": false}))["undo"], 0, "{name}: nothing ran");
     }
+    // An empty `expect` asks for nothing, so the call runs as without one (a small model fills
+    // every optional object and would otherwise loop on the refusal).
+    for name in ["execute", "batch"] {
+        let mut a = if name == "batch" { json!({"commands": [step]}) } else { step.clone() };
+        a["expect"] = json!({});
+        let r = raw_tool(&mut s, name, a);
+        assert_ne!(r["result"]["isError"], true, "{name}: {r}");
+    }
+    assert_eq!(tool(&mut s, "inspect_design", json!({"measure": false}))["undo"], 2, "both calls ran");
 }
 
 /// `execute` takes `expect` as `batch` does: met, the reply carries the expectation; not met,

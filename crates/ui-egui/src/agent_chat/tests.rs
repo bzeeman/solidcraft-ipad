@@ -2129,9 +2129,10 @@ fn an_endpoint_agent_drives_the_design_through_in_process_tools() {
     let done = rounds.clone();
     until(&mut app, &move |a| a.agent_chat.state() == State::Ready && done.lock().unwrap().len() == 2);
     assert_eq!(app.session.doc.features.len(), before + 1, "the agent's box is in the design");
-    let tools = &rounds.lock().unwrap()[0]["tools"];
+    let rounds = rounds.lock().unwrap().clone();
+    let tools = &rounds[0]["tools"];
     assert_eq!(tools[0]["function"]["name"], "execute", "the model was offered the in-process tools: {tools}");
-    let answer = rounds.lock().unwrap()[1]["messages"].as_array().unwrap().iter().find(|m| m["role"] == "tool").cloned().unwrap();
+    let answer = rounds[1]["messages"].as_array().unwrap().iter().find(|m| m["role"] == "tool").cloned().unwrap();
     assert!(answer["content"].to_string().contains("ok"), "the tool's answer went back to the model: {answer}");
     disconnect(&mut app);
 }
