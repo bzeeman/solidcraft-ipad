@@ -76,7 +76,8 @@ mod ios {
     const FINGER_MARK: f32 = 34.0;
 
     struct Shell {
-        app: SolveApp,
+        /// Boxed: the app is about 190 KB, so it lives on the heap, not the main thread's stack.
+        app: Box<SolveApp>,
         frames: u32,
         /// The Pencil, the fingers and what they do to a frame's input before the app reads it.
         input: input::Input,
@@ -297,7 +298,7 @@ mod ios {
                 solidcraft_ui_egui::fonts::setup_bundled_fonts(&cc.egui_ctx);
                 let mut services = Services::default();
                 documents::install(&mut services, &cc.egui_ctx);
-                let mut app = SolveApp::new(Session::default(), services);
+                let mut app = Box::new(SolveApp::new(Session::default(), services));
                 // The settings of the last run, before the iPad's own choices below override any.
                 if let Some(stored) = cc.storage.and_then(|s| solidcraft_ui_egui::prefs::stored(|k| s.get_string(k))) {
                     app.load_prefs(&stored);
