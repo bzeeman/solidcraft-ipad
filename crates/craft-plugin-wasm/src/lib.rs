@@ -159,11 +159,11 @@ pub fn update_fields<H: PluginHost + 'static>(
     context: &Value,
     request: &ImportRequest,
 ) -> (H, Result<Value>) {
-    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(target_os = "ios")))]
     {
         native::update_fields(host, manifest, component, entry, context, request)
     }
-    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[cfg(not(all(any(target_arch = "x86_64", target_arch = "aarch64"), not(target_os = "ios"))))]
     {
         let _ = (manifest, component, entry, context, request);
         (host, Err(craft_plugin::HostError::Trap { reason: "dialog hooks require a native build".into() }))
