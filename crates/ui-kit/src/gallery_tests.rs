@@ -224,6 +224,7 @@ pub const ELEMENTS: &[Element] = &[
             setting: "Z · 1°".into(),
             has_key: true,
             editable: false,
+            clear_key: None,
         };
         viewport_status_item(ui, &item, &mut StatusPresentation::default());
     }),
@@ -2800,6 +2801,28 @@ fn card_looks_follow_selected_hover_disabled_and_focus() {
     assert_eq!((disabled.fill, disabled.alpha, disabled.focus_ring), (CardFill::Face, 0.5, false), "a disabled card neither hovers nor shows focus");
     assert!(card_look(false, true, false, true).focus_ring);
     assert!(card_look(true, false, false, false).alpha < 1.0, "a selected card can be disabled too");
+}
+
+#[test]
+fn card_disclosure_keeps_its_body_inside_narrow_ltr_and_rtl_headers() {
+    let ctx = super::test_support::context();
+    for (title, layout) in
+        [("Corner 1", egui::Layout::left_to_right(egui::Align::Center)), ("زاوية 1", egui::Layout::right_to_left(egui::Align::Center))]
+    {
+        super::test_support::frame(&ctx, vec![], |ui| {
+            for width in [0.0, 1.0, 20.0, 240.0] {
+                ui.allocate_ui_with_layout(egui::vec2(width, 0.0), layout, |ui| {
+                    let closed = super::card_section(ui, "closed", title, false, Some("chevron"), |_| true);
+                    let open = super::card_section(ui, "open", title, true, Some("chevron"), |ui| {
+                        assert!(ui.available_width().is_finite());
+                        true
+                    });
+                    assert_eq!(closed, None);
+                    assert_eq!(open, Some(true));
+                });
+            }
+        });
+    }
 }
 
 #[test]
