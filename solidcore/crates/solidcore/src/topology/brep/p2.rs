@@ -80,9 +80,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::curve::curve::p2::is_curve_class;
 use crate::curve::curve::{p8::CurveIntersectOptions, Curve, CurveKind};
+use crate::error::query::QueryFailure;
 use crate::error::topology::TopologyFailure;
 use crate::error::{
-    ignore_status, EntityRef, Failure, Result, SolidError, SM_ERR, SM_ERR_NULL_POINTER,
+    ignore_status, native_failure, EntityRef, Failure, Result, SolidError, SM_ERR,
+    SM_ERR_NULL_POINTER,
 };
 use crate::geom::a_object::{self, BREP_TYPE};
 use crate::geom::attribute::{AttributeStore, ObjectKey};
@@ -245,7 +247,27 @@ pub fn is_sheet(k: &mut Kernel, b: &Brep) -> Result<bool> {
     if brep_shells(k, b)?.len() != 1 {
         return Ok(false);
     }
+    sheet_edges(b)
+}
 
+/// (Not upstream) [`is_sheet`] for a body of one or more separate sheets: only the infinite
+/// region (no solid one, whose shells would count too), at least one shell, at least one edge,
+/// and every edge lamina or manifold. A surface made from several profiles at once (a surface
+/// extrude of four circles) is one body of four sheets, each a shell of the infinite region.
+///
+/// # Errors
+///
+/// Those of `SmBrep::GetShells` ([`p1::shells`], the mark lock);
+/// [`SolidError::NotFound`] for a dangling id.
+pub fn is_sheets(k: &mut Kernel, b: &Brep) -> Result<bool> {
+    if brep_regions(b)?.len() != 1 || brep_shells(k, b)?.is_empty() {
+        return Ok(false);
+    }
+    sheet_edges(b)
+}
+
+/// [`is_sheet`]'s edge clause: at least one edge, and every edge lamina or manifold.
+fn sheet_edges(b: &Brep) -> Result<bool> {
     // sheets have edges that are all manifold or lamina
     let edges = brep_edges(b)?;
     if edges.is_empty() {
@@ -531,7 +553,7 @@ pub fn check_and_fix_uv_trim_curves(k: &Kernel, b: &mut Brep) -> Result<()> {
     }
     // not upstream: the check compares only a trim's ends with its edge's, so a kept trim
     // could stray from its edge inside by more than the edge tolerance
-    cover_kept_uv_trim_curves(k, b)
+    cover_kept_uv_trim_curves(k, b, true)
 }
 
 /// Not upstream: after [`check_and_fix_uv_trim_curves`]'s end check, every edge whose kept
@@ -561,7 +583,8 @@ pub fn check_and_fix_uv_trim_curves(k: &Kernel, b: &mut Brep) -> Result<()> {
 /// its fillet is the one made without the raise).
 ///
 /// A part file's read (`part_file::read_part_from_db`) runs no end check; each B-rep it
-/// builds is covered the same way.
+/// builds is covered the same way. `end_checked` says whether the end check ran
+/// ([`crate::topology::TrimCoverRaises::end_checked`]).
 ///
 /// Every distance is enclosed before any tolerance is raised, so a raise does not change
 /// what another use is measured against.
@@ -572,7 +595,7 @@ pub fn check_and_fix_uv_trim_curves(k: &Kernel, b: &mut Brep) -> Result<()> {
 /// [`edge::set_tolerance`].
 ///
 /// [`trim_distance_bound`]: crate::query::curve_surface_gap::polynomial_pieces::trim_distance_bound
-pub(crate) fn cover_kept_uv_trim_curves(k: &Kernel, b: &mut Brep) -> Result<()> {
+pub(crate) fn cover_kept_uv_trim_curves(k: &Kernel, b: &mut Brep, end_checked: bool) -> Result<()> {
     let mut raises = Vec::new();
     for eu in edgeuses(b, None)? {
         k.check_cancelled(COVER_OP)?;
@@ -580,7 +603,10 @@ pub(crate) fn cover_kept_uv_trim_curves(k: &Kernel, b: &mut Brep) -> Result<()> 
             raises.push((e, gap));
         }
     }
-    let mut record = crate::topology::TrimCoverRaises::default();
+    let mut record = crate::topology::TrimCoverRaises {
+        end_checked,
+        ..Default::default()
+    };
     // (every vertex tolerance as the read made it, to record those a raise cascades to)
     let vertices: Vec<_> = b.vertices().iter().map(|(v, r)| (v, r.tolerance)).collect();
     for (e, gap) in raises {
@@ -2067,7 +2093,9 @@ pub(crate) fn cache_entity(object: CacheObject) -> Result<EntityRef> {
 ///
 /// # Errors
 ///
-/// `SM_ERR` when the best hit is closer than `SM_EFF_ZERO * (1 + max |start|)`; errors
+/// `SM_ERR` when the best hit is closer than `SM_EFF_ZERO * (1 + max |start|)`, and (not
+/// upstream) [`QueryFailure::TangentAlongEdge`] when it is on a curved edge the ray grazes
+/// ([`ray_grazes_edge`]), so the caller fires another ray; errors
 /// of the B-rep box, the solve, the classification load and [`local_curve_sector`];
 /// [`SolidError::Unported`] from the callees.
 #[allow(clippy::too_many_arguments)] // one upstream routine
@@ -2258,6 +2286,16 @@ pub(crate) fn ray_fire_with_bbox_and_solver(
         }
     }
 
+    // Not upstream (#22582): a ray that grazes a curved edge says nothing about the edge's
+    // sectors, and the next ray is fired instead.
+    if let (PointClassType::Edge, Some(EntityRef::Edge(e))) =
+        (intersection.point_class(), intersection.object())
+    {
+        if ray_grazes_edge(k, b, e, intersection.t_param(), ray, ray_zone_tol_3d)? {
+            return Err(SolidError::query(OP, QueryFailure::TangentAlongEdge));
+        }
+    }
+
     // make temporary [StartPoint,IntersectionPoint] line segement
     let end = start + best.start.solution_value * ray;
     let line = Curve::from(BSplineCurve::create_line_segment(3, start, end)?);
@@ -2270,6 +2308,55 @@ pub(crate) fn ray_fire_with_bbox_and_solver(
         region,
         intersection,
     })
+}
+
+/// Whether `ray` (a unit direction) meets edge `e` of `b` at its curve parameter `t` too close
+/// to the edge's tangent for the hit to say which side the ray crosses to. The hit is found
+/// to the ray's tolerance `ray_zone_tol_3d`. Near a tangency the ray's distance to a curve of
+/// curvature `kappa` grows as `s^2 kappa / 2` along an arc `s`, so the hit is fixed only to an
+/// arc of `sqrt(2 tol / kappa)`, over which the tangent turns by `sqrt(2 tol kappa)`. A ray
+/// with `sin theta <= sqrt(2 tol kappa)` to the tangent at the hit is therefore within that
+/// uncertainty of the tangent at some point near it (or is a chord whose sagitta
+/// `theta^2 / (2 kappa)` is at most `tol`). Its direction across the edge is then a rounding
+/// error, and the edge's sectors would classify it either way. The edge's own tolerance is
+/// not used: it says where the edge may lie, not how well the hit was found, and a large one
+/// (a body the validity check is to report) would refuse rays that cross the edge.
+/// A straight edge (`kappa = 0`) is grazed only along its own line, which
+/// `radial_sector_of_curve_classify` refuses.
+/// A wire edge, which classifies by its region alone, and an edge whose curve does not
+/// evaluate there (the kernel's status) are not grazed.
+///
+/// # Errors
+///
+/// Those of the topology reads; port errors of the curve evaluation.
+fn ray_grazes_edge(
+    k: &Kernel,
+    b: &Brep,
+    e: EdgeId,
+    t: f64,
+    ray: Vec3,
+    ray_zone_tol_3d: f64,
+) -> Result<bool> {
+    if edge::is_wire(b, e)? {
+        return Ok(false);
+    }
+    let record = b.edge(e)?;
+    let Some(curve) = record.curve.as_ref() else {
+        return Ok(false);
+    };
+    let Some(derivatives) = native_failure(curve.evaluate(k, t, 2, true, true))? else {
+        return Ok(false);
+    };
+    let (Some(&d1), Some(&d2)) = (derivatives.get(1), derivatives.get(2)) else {
+        return Ok(false);
+    };
+    let speed = d1.length();
+    if speed <= EFF_ZERO {
+        return Ok(false);
+    }
+    let curvature = d1.cross(d2).length() / (speed * speed * speed);
+    let sine = (d1 / speed).cross(ray).length();
+    Ok(sine <= (2.0 * ray_zone_tol_3d * curvature).sqrt())
 }
 
 // ---- geometry replacement -----------------------------------------------------------------
@@ -4215,14 +4302,14 @@ mod tests {
             cancel: Some(token),
             ..Kernel::default()
         };
-        let stopped = cover_kept_uv_trim_curves(&cancelled, &mut b);
+        let stopped = cover_kept_uv_trim_curves(&cancelled, &mut b, true);
         assert!(
             matches!(&stopped, Err(err) if err.is_cancelled()),
             "{stopped:?}"
         );
         assert_eq!(tolerances(&b), held);
         // (not cancelled, the same cover raises the edge again)
-        cover_kept_uv_trim_curves(&k, &mut b).unwrap();
+        cover_kept_uv_trim_curves(&k, &mut b, true).unwrap();
         assert_eq!(edge::tolerance(&b, e).unwrap(), after);
     }
 }

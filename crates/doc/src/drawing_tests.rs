@@ -56,7 +56,7 @@ pub(crate) fn plate() -> Drawing {
     let (assembly, bolt_sheet) = (d.sheets[0].id, d.sheets[1].id);
     let mut add = |d: &mut Drawing, sheet, kind, place, settings, reference_shown_percent| {
         let id = d.allocate_id(&mut id_source).unwrap();
-        d.add_views([Arc::new(View { id, sheet, kind, place, settings, reference_shown_percent, label: None })]);
+        d.add_views([Arc::new(View { id, sheet, kind, place, settings, reference_shown_percent, centre_marks: None, label: None })]);
         id
     };
     let half = ViewOverrides { scale: Some("1:2".parse().unwrap()), ..ViewOverrides::default() };
@@ -104,7 +104,7 @@ pub(crate) fn plate() -> Drawing {
         })]);
     }
     let id = d.allocate_id(&mut id_source).unwrap();
-    d.balloons.add([Arc::new(Balloon { id, view: front, edge: edge("F1:front|F1:top"), at: [60.0, 45.0], parts_list: None })]);
+    d.balloons.add([Arc::new(Balloon { id, view: front, edge: edge("F1:front|F1:top"), at: [60.0, 45.0], parts_list: None, along: None })]);
     d.validate().unwrap();
     d
 }
@@ -416,7 +416,14 @@ fn full_block() -> TitleBlock {
     use solidcraft_geom::cell::{Content, Fit, HAlign, Part};
     let cell = |i: usize| {
         let (x, y) = ((i % 8) as f64 * 20.0 - 160.0, (i / 8) as f64 * 6.75);
-        let value = TextCell { content: Content(vec![Part::Text("-".into())]), cap_mm: 2.5, align: HAlign::Left, fit: Fit::default(), image: None };
+        let value = TextCell {
+            content: Content(vec![Part::Text("-".into())]),
+            cap_mm: 2.5,
+            align: HAlign::Left,
+            fit: Fit::default(),
+            image: None,
+            mass_unit: None,
+        };
         Cell { name: format!("cell_{i}"), rect_mm: [x, y, x + 20.0, y + 6.75], label: None, kind: CellKind::Text(value) }
     };
     TitleBlock { size_mm: Vec2::new(160.0, 54.0), outline_line_mm: 0.7, cell_line_mm: 0.35, cells: (0..64).map(cell).collect() }
@@ -2305,6 +2312,7 @@ fn sheet_sketch_unsupported_equations_and_centerlines_are_refused_before_solving
                 end: "1".into(),
                 tolerance: 0.01,
                 variable_unit: solidcraft_sketch::VariableUnit::Number,
+                radians_trig: false,
             });
             "equations"
         };

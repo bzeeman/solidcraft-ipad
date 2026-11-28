@@ -31,7 +31,9 @@
 //! | [`BlendDefinition`](solidcore_record::brep::blend::BlendDefinition) (a face's blend) | `FaceDefinition` | [`blend::blend`] | [`blend::record_blend`] |
 //!
 //! [`brep`] converts the record's B-rep to the kernel's body and back; [`cell_grid`] the cell
-//! grid's spec and plan; [`develop`] a sheet metal part's surfaces and its flat pattern.
+//! grid's spec and plan; [`develop`] a sheet metal part's surfaces and its flat pattern; [`frame`]
+//! frame-stock pieces, members and gusset supports; [`shaft_spline`] a shaft spline's numbers,
+//! plan and outlines.
 
 #![forbid(unsafe_code)]
 #![deny(clippy::disallowed_methods)]
@@ -40,6 +42,10 @@ pub mod blend;
 pub mod brep;
 pub mod cell_grid;
 pub mod develop;
+pub mod frame;
+pub mod round_face;
+pub mod shaft_spline;
+pub mod sweep;
 
 use solidcore::eval as k;
 use solidcore::prism::profile as kp;
@@ -363,6 +369,11 @@ fn surface_inner(s: &Surface) -> Result<k::Surface, Invalid> {
                 "a blend's label: its geometry is the face's NURBS form",
             ))
         }
+        Surface::Sweep { .. } => {
+            return Err(Invalid(
+                "a sweep's label: its geometry is the face's NURBS form",
+            ))
+        }
     })
 }
 
@@ -599,5 +610,19 @@ pub fn record_region2(r: &kp::Region2) -> Region2 {
     Region2 {
         outer: record_loop2(&r.outer),
         holes: r.holes.iter().map(record_loop2).collect(),
+    }
+}
+
+/// The kernel's standing of an imported cubic as the record's.
+#[must_use]
+pub fn record_cubic_standing(
+    s: solidcore::curve::hermite_curve::CubicStanding,
+) -> solidcore_record::curve_query::CubicStanding {
+    use solidcore::curve::hermite_curve::CubicStanding as K;
+    use solidcore_record::curve_query::CubicStanding as R;
+    match s {
+        K::Chord => R::Chord,
+        K::Curve => R::Curve,
+        K::Refused => R::Refused,
     }
 }

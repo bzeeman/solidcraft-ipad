@@ -140,8 +140,11 @@ fn transport_view(app: &SolveApp) -> crate::timeline_fold::View {
                 && section.tabs.iter().any(|instance| instance.0 == "history")
         })
     });
-    if side_history || app.preferences.history_in_browser || !app.preferences.history_steps_component {
+    if app.preferences.history_in_browser || !app.preferences.history_steps_component {
         return crate::timeline_fold::View::of(doc, None, true);
+    }
+    if side_history {
+        return crate::timeline_fold::View::of(doc, None, app.tree.history_show_hidden);
     }
     let within = crate::timeline_scope::shown(app).map(|c| crate::timeline_scope::components_within(app, c));
     crate::timeline_fold::View::of(doc, within.as_ref(), app.tree.history_show_hidden)
@@ -271,7 +274,10 @@ impl TimelineKind {
     pub(crate) fn of(kind: &FeatureKind) -> Self {
         match kind {
             FeatureKind::Sketch { .. } => Self::Sketch,
-            FeatureKind::Extrude { sketch, .. } | FeatureKind::Revolve { sketch, .. } | FeatureKind::Sweep { sketch, .. } => Self::Profile(*sketch),
+            FeatureKind::Extrude { sketch, .. }
+            | FeatureKind::Revolve { sketch, .. }
+            | FeatureKind::Sweep { sketch, .. }
+            | FeatureKind::Coil { sketch: Some(sketch), .. } => Self::Profile(*sketch),
             // Sheet metal drawn from a sketch: the base flange's outline and the contour flange's chain.
             FeatureKind::SheetBase { sketch, .. } | FeatureKind::SheetContour { sketch, .. } => Self::Profile(*sketch),
             _ => Self::Other,
@@ -284,6 +290,19 @@ impl TimelineKind {
             _ => None,
         }
     }
+}
+
+/// What an Edit Profile Sketch button or menu entry says on hover: the sketch it opens, by the
+/// name the Browser shows it under (#20405).
+pub(crate) fn profile_sketch_tip(app: &SolveApp, sketch: u64) -> Option<String> {
+    let name = crate::i18n::tr_name(&app.session.doc.feature(sketch)?.name);
+    Some(solidcraft_ui_text::format("browser.edit_profile_sketch_of", &[("sketch", &name)]))
+}
+
+/// An Edit Profile Sketch entry that names its sketch on hover. A reason the entry is off, set
+/// after this, takes the hover's place.
+pub(crate) fn naming_profile_sketch(app: &SolveApp, item: Item, sketch: Option<u64>) -> Item {
+    Item { tip: sketch.and_then(|sketch| profile_sketch_tip(app, sketch)), ..item }
 }
 
 /// The History menus' edit item, label and icon: a sketch says Edit Sketch, as its Browser row
@@ -306,21 +325,25 @@ pub(crate) fn icon_of(k: &FeatureKind) -> &'static str {
         FeatureKind::SurfaceSweep { .. } => "surface_sweep",
         FeatureKind::SurfaceLoft { .. } => "surface_loft",
         FeatureKind::SurfaceOffset { .. } => "surface_offset",
+        FeatureKind::SurfaceMidsurface { .. } => "surface_offset",
         FeatureKind::SurfaceRuled { .. } => "surface_ruled",
         FeatureKind::SurfaceUntrim { .. } => "surface_untrim",
         FeatureKind::SurfaceBlend { .. } => "surface_blend",
         FeatureKind::SurfaceBoundary { .. } | FeatureKind::SurfaceNetwork { .. } => "surface_boundary",
         FeatureKind::SurfaceMatch { .. } => "continuity",
         FeatureKind::SurfaceFair { .. } => "surface_fair",
+        FeatureKind::SurfaceMorph { .. } => "surface_morph",
         FeatureKind::Revolve { .. } => "revolve",
         FeatureKind::Fillet { .. } => "fillet",
         FeatureKind::Chamfer { .. } => "chamfer",
+        FeatureKind::Dogbone { .. } => "dogbone",
         FeatureKind::Box { .. } => "box",
         FeatureKind::Cylinder { .. } => "cylinder",
         FeatureKind::Sphere { .. } => "sphere",
         FeatureKind::Torus { .. } => "torus",
         FeatureKind::Cone { .. } => "cone",
         FeatureKind::Combine { .. } => "combine",
+        FeatureKind::FingerJoint { .. } => "finger_joint",
         FeatureKind::Pattern { pattern: solidcraft_engine::doc::PatternKind::Rectangular { .. }, .. } => "pattern_rect",
         FeatureKind::Pattern { pattern: solidcraft_engine::doc::PatternKind::Path { .. }, .. } => "pattern_path",
         FeatureKind::Pattern { .. } => "pattern_circ",
@@ -342,13 +365,16 @@ pub(crate) fn icon_of(k: &FeatureKind) -> &'static str {
             PointDef::AlongPath { .. } => "point_along_path",
             PointDef::Average { .. } => "c_midpoint",
         },
+        FeatureKind::Hole { hardware: Some(_), .. } => "press_in_hardware",
         FeatureKind::Hole { .. } => "hole",
         FeatureKind::Loft { .. } => "loft",
         FeatureKind::Sweep { .. } => "sweep",
         FeatureKind::Shell { .. } => "shell",
+        FeatureKind::Dome { .. } => "dome",
         FeatureKind::Draft { .. } => "draft",
         FeatureKind::Split { .. } => "split",
         FeatureKind::Move { .. } => "move",
+        FeatureKind::CapturePosition { .. } => "capture",
         FeatureKind::Import { .. } | FeatureKind::MeshImport { .. } | FeatureKind::MeshConvert { .. } => "import",
         FeatureKind::MeshReduce { .. } => "mesh_reduce",
         FeatureKind::BodyTransfer { .. } => "move",
@@ -363,6 +389,7 @@ pub(crate) fn icon_of(k: &FeatureKind) -> &'static str {
         FeatureKind::FrameEndCap { .. } => "end_cap",
         FeatureKind::FrameGusset { .. } => "gusset",
         FeatureKind::FrameMember { .. } => "frame_member",
+        FeatureKind::FrameCope { .. } => "frame_cope",
         FeatureKind::FrameMemberTurn { .. } => "rotate_member",
         FeatureKind::FrameTrim { .. } => "frame_trim",
         FeatureKind::FramePlate { .. } => "frame_plate",
@@ -372,6 +399,7 @@ pub(crate) fn icon_of(k: &FeatureKind) -> &'static str {
         FeatureKind::Coil { .. } => "coil",
         FeatureKind::SheetPerforate { .. } => "perforate",
         FeatureKind::CellGrid { .. } => "perforate",
+        FeatureKind::ShaftSpline { .. } => "shaft_spline",
         FeatureKind::SheetBead { .. } => "rib",
         FeatureKind::BoundaryFill { .. } => "boundary_fill",
         FeatureKind::Patch { .. } => "surface_patch",
@@ -546,17 +574,6 @@ impl MenuRule {
     pub(crate) fn one(&self, item: Item) -> Item {
         item.off_because(self.one_off.clone())
     }
-
-    /// The same entry as a row of the vertical History's menu: `row` draws it, enabled or not
-    /// as it is told, and the reason goes on its hover.
-    pub(crate) fn one_row(&self, row: impl FnOnce(bool) -> egui::Response) -> egui::Response {
-        use crate::ui_kit::BackingTooltipExt as _;
-        let row = row(self.one_off.is_none());
-        match &self.one_off {
-            Some(why) => row.backing_on_hover_text(why.as_str()),
-            None => row,
-        }
-    }
 }
 
 /// Delete's label in a feature's menu: how many features it deletes when that is more than one.
@@ -564,16 +581,6 @@ pub(crate) fn delete_label(count: usize) -> String {
     match count {
         1 => solidcraft_ui_text::tr_label("Delete").to_string(),
         n => solidcraft_ui_text::format("timeline.delete_many", &[("count", &n.to_string())]),
-    }
-}
-
-/// Delete in a feature's menu, in both timelines: the selected features when the right-clicked
-/// one is among them, labelled with how many, else that feature alone (#5005).
-pub(crate) fn delete_button(app: &mut SolveApp, ui: &mut egui::Ui, id: u64) {
-    let targets = menu_targets(app, id);
-    if crate::ui_kit::menu::button(ui, &delete_label(targets.len()), "delete").clicked() {
-        delete_features(app, targets);
-        ui.close();
     }
 }
 
@@ -606,27 +613,25 @@ fn features_from(app: &SolveApp, from: usize, shown: Option<&[usize]>) -> Vec<u6
 /// ones when the timeline is filtered to a component, with the entry's label, for one delete
 /// through [`delete_features`] so the confirmation still lists what would fail. Not offered
 /// before the marker, nor when the menu acts on several selected features: an entry that acts
-/// partly on the selection and partly beyond it is hard to read.
+/// partly on the selection and partly beyond it is hard to read. Nor when the feature itself is
+/// all it would delete: Delete beside it does the same (#23191).
 fn after_marker(app: &SolveApp, id: u64, index: usize, marker: usize, shown: Option<&[usize]>) -> Option<(String, Vec<u64>)> {
     if index < marker || menu_targets(app, id).len() > 1 {
         return None;
     }
     let ids = features_from(app, marker, shown);
     // A feature the bar's filter leaves out has nothing shown after the marker to delete.
-    if ids.is_empty() {
+    if ids.is_empty() || ids == [id] {
         return None;
     }
     let key = if ids.len() == 1 { "timeline.delete_after_marker_one" } else { "timeline.delete_after_marker_other" };
     Some((solidcraft_ui_text::format(key, &[("count", &ids.len().to_string())]), ids))
 }
 
-/// The [`after_marker`] entry as a button.
-pub(crate) fn delete_after_marker_button(app: &mut SolveApp, ui: &mut egui::Ui, id: u64, index: usize, marker: usize, shown: Option<&[usize]>) {
-    let Some((label, ids)) = after_marker(app, id, index, marker, shown) else { return };
-    if crate::ui_kit::menu::button(ui, &label, "delete").clicked() {
-        delete_features(app, ids);
-        ui.close();
-    }
+/// The optional delete-after-marker entry as menu data.
+pub(crate) fn delete_after_marker_item(app: &SolveApp, id: u64, index: usize, marker: usize, shown: Option<&[usize]>) -> Option<Item> {
+    after_marker(app, id, index, marker, shown)
+        .map(|(label, ids)| Item::action("ui.deleteAfterMarker", &label, "delete").with(json!({"features":ids})))
 }
 
 /// A History bar feature's menu (`Target::Timeline`): edit, rename, group, suppress, roll back,
@@ -644,7 +649,9 @@ pub(crate) fn feature_items(app: &SolveApp, id: u64) -> Vec<Item> {
         v.extend(redefine);
     }
     if let Some(sketch) = TimelineKind::of(&feature.kind).profile_sketch() {
-        v.push(rule.one(Item::action("ui.editSketch", "Edit Profile Sketch", "sketch").with(json!({ "sketch": sketch.0 }))));
+        let item = Item::action("ui.editSketch", "Edit Profile Sketch", "sketch").with(json!({ "sketch": sketch.0 }));
+        v.push(rule.one(naming_profile_sketch(app, item, Some(sketch.0))));
+        v.push(rule.one(Item::action("ui.editDimensions", "Edit Dimensions", "dimension").with(json!({ "sketch": sketch.0 }))));
     }
     // Its own message, not a literal: no catalog held the literal, so the item stayed English
     // in every language (#8301).
@@ -699,19 +706,6 @@ pub(crate) fn anchor_key(id: u64) -> String {
     format!("f:{id}")
 }
 
-/// Copy and Paste in a feature's timeline menu. Paste puts the copies at the history marker.
-pub(crate) fn clipboard_buttons(app: &mut SolveApp, ui: &mut egui::Ui, id: u64) {
-    if crate::ui_kit::menu::button(ui, solidcraft_ui_text::tr_label("Copy"), "copy").clicked() {
-        let features = menu_targets(app, id);
-        let _ = app.run("timeline.copy", json!({ "features": features }));
-        ui.close();
-    }
-    if crate::ui_kit::menu::button_enabled(ui, solidcraft_ui_text::tr_label("Paste"), "paste", !app.session.clipboard.is_empty()).clicked() {
-        let _ = app.run("timeline.paste", json!({}));
-        ui.close();
-    }
-}
-
 /// A feature tooltip's (and its copied message's) name, type, error and warning: an import's
 /// summary as it is (the mark already says it is a warning), any other warning labelled.
 pub(crate) fn feature_status_tip(name: &str, ty: &str, result: Option<&FeatureResult>) -> StatusTip {
@@ -752,7 +746,11 @@ pub(crate) fn feature_tooltip(
 ) -> StatusTip {
     // The type as a user reads it, translated, without the programmatic `Feature` suffix: a
     // user sees "Fillet", not "FilletFeature".
-    let kind = solidcraft_ui_text::tr_label(ty.strip_suffix("Feature").unwrap_or(ty));
+    let kind_name = match ty.strip_suffix("Feature").unwrap_or(ty) {
+        "CapturePosition" => "Capture Position",
+        other => other,
+    };
+    let kind = solidcraft_ui_text::tr_label(kind_name);
     let mut lines = Vec::new();
     // Greyed out says only "not shown": say why (#8100).
     if rolled {
@@ -956,44 +954,6 @@ pub(crate) fn import_summary(report: &ImportReport) -> String {
     out.join(" ")
 }
 
-/// Copy Error Message (or Copy Warning Message) in the menu of a feature that has one. It is
-/// one feature's message, so the [`MenuRule`] leaves it out for several selected features.
-pub(crate) fn message_button(app: &SolveApp, ui: &mut egui::Ui, id: u64) {
-    if menu_rule(app, id).many {
-        return;
-    }
-    let Some(text) = feature_message(app, id) else { return };
-    let failed = app.session.model.result(id).is_some_and(|r| r.error.is_some());
-    let label = if failed { "Copy Error Message" } else { "Copy Warning Message" };
-    if crate::ui_kit::menu::button(ui, solidcraft_ui_text::tr_label(label), "copy").clicked() {
-        ui.ctx().copy_text(text);
-        ui.close();
-    }
-}
-
-/// Reuse the Browser action so both History layouts edit the same sketch attachment.
-pub(crate) fn sketch_plane_button(app: &mut SolveApp, ui: &mut egui::Ui, id: u64) {
-    if !matches!(app.session.doc.feature(id).map(|feature| &feature.kind), Some(FeatureKind::Sketch { .. })) {
-        return;
-    }
-    let Some(item) =
-        crate::context_menu::items(app, &crate::context_menu::Target::Sketch { id }).into_iter().find(|item| item.id == "ui.redefineSketch")
-    else {
-        return;
-    };
-    use crate::ui_kit::BackingTooltipExt as _;
-    // The item says why it is off: it takes one sketch, so it is off for several selected features.
-    let response = crate::ui_kit::menu::button_enabled(ui, &item.label, &item.icon, item.enabled);
-    let response = match &item.tip {
-        Some(tip) => response.backing_on_hover_text(tip.as_str()),
-        None => response,
-    };
-    if response.clicked() {
-        crate::context_menu::run_item(app, &item, response.rect.center());
-        ui.close();
-    }
-}
-
 /// Shift+click on a feature: select the features from the anchor (the last feature clicked, or
 /// the last selected one) to this one. `order` is the timeline as drawn this frame, taken from
 /// the list it was drawn from so the range never mixes two orders. Ctrl as well adds the range to
@@ -1189,16 +1149,20 @@ pub(crate) fn tick_playback(app: &mut SolveApp, ctx: &egui::Context) {
 }
 
 /// A folder's Edit Holes item, when it holds holes only: one Hole dialog for all of them.
-pub(crate) fn edit_holes_item(app: &mut SolveApp, ui: &mut egui::Ui, folder: u64) {
-    if crate::hole_folder::holes(app, folder).is_none() {
-        return;
+pub(crate) fn edit_holes_item(app: &SolveApp, folder: u64) -> Option<Item> {
+    crate::hole_folder::holes(app, folder).map(|_| Item::action("ui.history.editHoles", "Edit Holes", "hole").with(json!({"folder":folder})))
+}
+
+pub(crate) fn run_holes_item(app: &mut SolveApp, item: &Item) -> bool {
+    if item.id != "ui.history.editHoles" {
+        return false;
     }
-    if crate::ui_kit::menu::button(ui, "Edit Holes", "hole").clicked() {
-        if let Err(why) = crate::hole_folder::open(app, folder) {
-            app.set_status(why, true);
-        }
-        ui.close();
+    if let Some(folder) = item.params.as_ref().and_then(|p| p.get("folder")).and_then(Value::as_u64)
+        && let Err(why) = crate::hole_folder::open(app, folder)
+    {
+        app.set_status(why, true);
     }
+    true
 }
 
 /// Where the bottom History strip publishes its marker and feature chips.
@@ -1392,7 +1356,7 @@ fn timeline_strip(app: &mut SolveApp, ui: &mut egui::Ui, floating: bool, x: f32)
     // edited or picked component's features, after the path to it (`timeline_scope`).
     let strip = crate::timeline_fold::Strip { marker, from_view, floating, accent };
     crate::timeline_scope::follow(app);
-    let history = crate::timeline_fold::history(app, &strip);
+    let history = crate::timeline_fold::cached(app, ui, &strip);
     // The edited component's last feature, scrolled into view once (`timeline_scope`): the
     // folded chip holding it, its component's own chip, or the feature itself. Read before the
     // path, whose click asks for it in what the next frame shows.
@@ -1606,6 +1570,15 @@ impl history_bar::Contents for BarSteps<'_> {
 /// (Preferences › Layout), the first body is also found there, as Find in Browser on a body
 /// does: the rows down to it open.
 pub(crate) fn find_in_browser(app: &mut SolveApp, ids: &[u64]) {
+    // A construction plane, axis or point is found in its Construction folder (#15355).
+    if let [id] = ids
+        && app.session.doc.feature(*id).is_some_and(|f| {
+            matches!(f.kind, FeatureKind::ConstructionPlane { .. } | FeatureKind::ConstructionAxis { .. } | FeatureKind::ConstructionPoint { .. })
+        })
+    {
+        crate::browser::reveal_construction(app, *id);
+        return;
+    }
     let st = crate::open_meshing::session_world(&app.session);
     let mut bodies: Vec<String> = Vec::new();
     let mut items: Vec<serde_json::Value> = Vec::new();
@@ -2044,6 +2017,7 @@ mod tests {
             ("surface.fair", json!({"type":"surface_fair", "body":"A", "tolerance":"0.001"})),
             ("solid.rib", json!({"type":"rib", "sketch":0, "curves":[], "thickness":"2"})),
             ("solid.web", json!({"type":"rib", "sketch":0, "curves":[], "thickness":"2", "web":true})),
+            ("solid.finger_joint", json!({"type":"finger_joint", "bodies":["A","B"], "count":3, "clearance":"0"})),
         ];
         for (id, definition) in cases {
             let feature: solidcraft_engine::doc::FeatureKind = serde_json::from_value(definition).unwrap();
@@ -2061,9 +2035,12 @@ mod tests {
             placements: Vec::new(),
             components: Vec::new(),
             occurrences: Vec::new(),
+            join: false,
             pattern: PatternKind::Path {
                 path_sketch: solidcraft_engine::doc::SketchId(0),
                 path: Vec::new(),
+                path_body: None,
+                path_edges: Vec::new(),
                 count: "2".into(),
                 spacing: "10".into(),
                 extent: false,
@@ -2075,6 +2052,28 @@ mod tests {
             },
         };
         assert_eq!(super::icon_of(&feature), solidcraft_engine::find_command("solid.pattern.path").unwrap().icon);
+    }
+
+    #[test]
+    fn capture_position_history_icon_and_tooltip_translate() {
+        crate::i18n::install();
+        use solidcraft_engine::doc::FeatureKind;
+        let feature = FeatureKind::CapturePosition { moves: Vec::new(), joints: Vec::new() };
+        let cmd = solidcraft_engine::find_command("component.capture_position").unwrap();
+        let icon = super::icon_of(&feature);
+        assert_eq!(icon, "capture");
+        assert_eq!(icon, cmd.icon);
+        assert!(!crate::icon_svg::resolve(icon).placeholder);
+
+        let _en = solidcraft_ui_text::scope("en");
+        let en_tip = super::feature_tooltip("CapturePosition1", "CapturePositionFeature", None, false, None);
+        assert!(en_tip.head.contains("Capture Position"), "en head: {:?}", en_tip.head);
+        assert!(!en_tip.head.contains("CapturePositionFeature"), "en head: {:?}", en_tip.head);
+
+        let _ja = solidcraft_ui_text::scope("ja");
+        let ja_tip = super::feature_tooltip("CapturePosition1", "CapturePositionFeature", None, false, None);
+        let ja_expected = solidcraft_ui_text::Locale::for_language("ja").text("cmd.component_capture_position");
+        assert!(ja_tip.head.contains(ja_expected), "ja head: {:?}, expected: {ja_expected}", ja_tip.head);
     }
 
     fn two_boxes(left: bool) -> Harness {
@@ -4797,5 +4796,73 @@ mod tests {
             assert_eq!(h.app.viewport.hover_feature, None, "left={left}");
             assert_eq!(super::from_view(&h.app), [None, None], "left={left}");
         }
+    }
+
+    #[test]
+    fn left_docked_capture_position_double_click_and_context_menu_actions() {
+        let mut h = Harness::new();
+        h.app.home.open = false;
+        h.app.ui.show_timeline = true;
+        h.app.run("view.history_layout", json!({"dock": "left"})).unwrap();
+        let occ = h.app.run("component.create", json!({"name": "PartA", "grounded": false})).unwrap()["occurrence"].as_u64().unwrap();
+        h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "BoxA"})).unwrap();
+        h.app.run("component.activate", json!({"component": "root"})).unwrap();
+        h.app.run("occurrence.move", json!({"occurrence": occ, "translate": [20, 0, 0], "capture": false})).unwrap();
+        h.app.run("component.capture_position", json!({})).unwrap();
+        h.frames(3);
+
+        // Double-click CapturePosition1 in the left-docked timeline -> opens CapturePosition dialog.
+        h.step(&json!({"click": {"handle": "timeline:CapturePosition1"}, "double": true})).unwrap();
+        h.frames(2);
+        assert!(matches!(h.app.dialog.as_ref().map(|d| &d.kind), Some(crate::dialogs::Kind::CapturePosition(_))));
+        h.step(&json!({"key": "Escape"})).unwrap();
+        h.frames(2);
+        assert!(h.app.dialog.is_none());
+
+        // Right-click menu picks: Suppress Feature -> Unsuppress Feature -> Roll History Marker Here -> Go to End -> Delete.
+        h.step(&json!({"click": {"handle": "timeline:CapturePosition1"}, "button": "right"})).unwrap();
+        h.step(&json!({"widget": "Suppress Feature"})).unwrap();
+        h.settle();
+        assert!(h.app.session.doc.find_feature("CapturePosition1").unwrap().suppressed);
+
+        h.step(&json!({"click": {"handle": "timeline:CapturePosition1"}, "button": "right"})).unwrap();
+        h.step(&json!({"widget": "Unsuppress Feature"})).unwrap();
+        h.settle();
+        assert!(!h.app.session.doc.find_feature("CapturePosition1").unwrap().suppressed);
+
+        h.step(&json!({"click": {"handle": "timeline:Box1"}, "button": "right"})).unwrap();
+        h.step(&json!({"widget": "Roll Back Here"})).unwrap();
+        h.settle();
+        assert_eq!(h.app.session.doc.marker, Some(1));
+
+        h.step(&json!({"click": {"handle": "timeline:CapturePosition1"}, "button": "right"})).unwrap();
+        h.step(&json!({"widget": "Roll Back Here"})).unwrap();
+        h.settle();
+        assert!(matches!(h.app.session.doc.marker, None | Some(2)), "{:?}", h.app.session.doc.marker);
+
+        h.step(&json!({"click": {"handle": "timeline:CapturePosition1"}, "button": "right"})).unwrap();
+        h.step(&json!({"widget": "Delete"})).unwrap();
+        h.settle();
+        assert!(h.app.session.doc.find_feature("CapturePosition1").is_none());
+    }
+
+    #[test]
+    fn capture_position_in_active_subcomponent_appears_in_bottom_timeline() {
+        let mut h = Harness::new();
+        h.app.home.open = false;
+        h.app.ui.show_timeline = true;
+        h.app.run("view.history_layout", json!({"dock": "bottom"})).unwrap();
+        let frame_comp = h.app.run("component.create", json!({"name": "frame", "grounded": true})).unwrap()["component"].as_u64().unwrap();
+        let child_occ = h.app.run("component.create", json!({"name": "frame_z", "parent": frame_comp, "grounded": false})).unwrap()["occurrence"]
+            .as_u64()
+            .unwrap();
+        h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10, "body_name": "BoxZ"})).unwrap();
+        h.app.run("component.activate", json!({"component": frame_comp})).unwrap();
+        h.app.run("occurrence.move", json!({"occurrence": child_occ, "translate": [20, 0, 0], "capture": false})).unwrap();
+        h.app.run("component.capture_position", json!({})).unwrap();
+        let cp = h.app.session.doc.find_feature("CapturePosition1").expect("CapturePosition1 created");
+        assert_eq!(cp.component, frame_comp, "CapturePosition belongs to active subcomponent");
+        let names = shown(&mut h);
+        assert!(names.contains(&"timeline:CapturePosition1".to_string()), "CapturePosition1 visible in active subcomponent timeline: {names:?}");
     }
 }

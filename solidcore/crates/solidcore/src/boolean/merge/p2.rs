@@ -1203,18 +1203,7 @@ fn copy_uv_trim_curves_of_other_face(
             // surface): it is carried as before, unproved either way. A pair with exact data
             // is carried only on a bound within the tolerance: one not enclosed is
             // `Some(INFINITY)`, and a NaN bound proves nothing)
-            let turn_away = gap.is_some_and(|g| g.is_nan() || g > tol);
-            // (test-only seam of the goldens' WR-450 replay, feature `wr57-replay`: the
-            // carry before this gate kept every such trim)
-            #[cfg(feature = "wr57-replay")]
-            let turn_away = crate::surface::surface::replay::choose(
-                k,
-                surface,
-                crate::surface::surface::replay::Seam::CarryGate,
-                &[],
-                turn_away,
-            )?;
-            if turn_away {
+            if gap.is_some_and(|g| g.is_nan() || g > tol) {
                 continue;
             }
         }
@@ -2084,6 +2073,7 @@ impl<O: ClassObject + SolutionObject + Ord> MergeState<TopologyIntersector<O>> {
 mod tests {
     use super::*;
     use crate::geom::solution_array::ObjectKind;
+    use crate::math::det;
 
     /// A handle: a kind and an index.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -2133,7 +2123,7 @@ mod tests {
                 .map(|i| {
                     let x = f64::from(i);
                     let z = if i == 3 { lift } else { 0.0 };
-                    CPoint::from_point(Vec3::new(x, (x * 0.7).sin(), z))
+                    CPoint::from_point(Vec3::new(x, det::sin(x * 0.7), z))
                 })
                 .collect()
         };

@@ -268,6 +268,9 @@ fn origin(
                     remap(datum)?;
                 }
             }
+            solidcraft_doc::joints::Snap::BetweenFaces { snap: Some(inner), .. } => {
+                datum_side(inner, occurrences, doc)?;
+            }
             _ => {}
         }
         Some(())
@@ -278,6 +281,9 @@ fn origin(
     datum_side(&mut out.snap, occurrences, doc)?;
     if let Some(feature) = out.snap.secondary_axis_feature_mut() {
         *feature = *features.get(feature)?;
+    }
+    if let Some(sketch) = out.snap.sketch_feature_mut() {
+        *sketch = *features.get(sketch)?;
     }
     for face in out.snap.face_names_mut() {
         *face = face_name(face, features, bodies)?;

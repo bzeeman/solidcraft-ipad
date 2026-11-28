@@ -14,6 +14,7 @@
 //! | [`SurfaceEval::eval_normal_section`]              | `SmSurfaceEval::EvalNormalSection`               |
 //! | [`pass_sp_convergence_test`]                      | `sm_PassSPConvergenceTest` (static)              |
 //! | [`Surface::create_seam_curve`]                    | `SmSurface::CreateSeamCurve`                     |
+//! | [`Surface::seam_ruling`]                          | not upstream: a cone's seam as its ruling line |
 //! | [`Surface::create_line_on_surf`]                  | `SmSurface::CreateLineOnSurf`                    |
 //! | [`Surface::is_on_seam`], [`SeamInfo`]             | `SmSurface::IsOnSeam`                            |
 //! | [`Surface::global_point_solve`], [`Surface::global_point_solve_point_test_off`], [`Surface::global_point_solve_face_tested`], [`FaceTest`], [`global_point_solve_starts`], [`NoObject`] | `SmSurface::GlobalPointSolve` |
@@ -56,6 +57,13 @@
 //! - **`CreateSeamCurve`** returns `None` for a surface that is not closed and builds
 //!   its [`CrvOnSurf`] on the concrete [`Surface`], retaining its virtual evaluation
 //!   and native owning-copy behavior.
+//! - **A seam's ruling** ([`Surface::seam_ruling`], not upstream). On a native cone or
+//!   cylinder the seam is a ruling, which is a [`Line`] over the seam's own interval: the
+//!   curve on the surface and the line are the same curve, parameter for parameter, and an
+//!   analytic curve has its intersections with lines and circles in closed form, where a
+//!   curve on a surface needs a cache and a subdivision solve
+//!   (tangency-labs/solidcraft#11574). The seam checks intersect the line in the seam's
+//!   place and read the seam itself everywhere else.
 //! - **Classification** (`sm_ClassifyCurveSurfaceXSectPoint`) returns the outputs as
 //!   [`XsectClassification`]; an out-of-domain guess keeps its unclamped values, as
 //!   upstream. `SmCurve::EvaluateGeometric` failing with `SM_ERR` marks the point touching
@@ -96,6 +104,7 @@ use crate::geom::tol::contact_tol_3d;
 use crate::geom::vector2d::Vec2;
 use crate::geom::vector3d::{asin, sqrt as sm_sqrt};
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::{
     Point2, Point3, Vec3, EFF_ZERO, EFF_ZERO_PARAM, EFF_ZERO_RAD, EFF_ZERO_SQ, EFF_ZERO_SQRT, PI,
     UNDEF_DOUBLE,
@@ -104,6 +113,7 @@ use crate::nurbs::b_spline_surface::SurfParamType;
 use crate::nurbs::b_spline_surface_n_lib::p2::EvaluateFlags;
 use crate::nurbs::knots::Side;
 use crate::surface::plane::Plane;
+use crate::surface::surface_point_solve::p3::EmptyAnswer;
 
 use super::p1::get_surface_cache;
 use super::p1::{
@@ -112,7 +122,8 @@ use super::p1::{
     SsNormalizeEnfo, SsiNormalizeEnfo, SspIntersectEnfo,
 };
 use super::p2::{
-    convert_to_parameter_delta, evaluate_geometric, LocalSurfaceType, SurfaceEval, TsectCurveType,
+    convert_to_parameter_delta, evaluate_geometric, LocalSurfaceType, SurfaceEval, SurfaceKind,
+    TsectCurveType,
 };
 use super::Surface;
 
@@ -1267,6 +1278,43 @@ impl Surface {
         Ok(Some(seam))
     }
 
+    /// `seam`, this surface's seam in `param` ([`Surface::create_seam_curve`]), as a
+    /// [`Line`] over the seam's interval when it is one, parameter for parameter; `None`
+    /// otherwise.
+    ///
+    /// Not upstream: on a native cone or cylinder ([`SurfaceKind::Cone`]) a seam runs
+    /// along the sweep, where the sweep angle is constant, and the cone's height is
+    /// affine in its NURB's linear parameter (`cone_convert_uv_from_nurbs_to_step`). So
+    /// the seam is the ruling between its two ends, at a parameter affine in the seam's.
+    /// Any other surface, and a cone's direction that is not its sweep, has no ruling.
+    ///
+    /// # Errors
+    ///
+    /// Those of the seam's evaluation at its ends.
+    pub fn seam_ruling(
+        &self,
+        kernel: &Kernel,
+        param: SurfParamType,
+        seam: &CrvOnSurf,
+    ) -> Result<Option<Curve>> {
+        // the seam is a ruling when its constant parameter is the cone's sweep: the NURB's
+        // v when its UV are swapped (`SurfOfRevolution::swap_uv`), else its u
+        let ruling = match self.kind() {
+            SurfaceKind::Cone(cone) => (param == SurfParamType::V) == cone.rev.swap_uv(),
+            _ => false,
+        };
+        let interval = seam.natural_interval();
+        // `Line::from_points` is over [0, 1], the seam's interval (`create_seam_curve`'s
+        // UV line), unless the two ends are one point, which a cone's height range is not
+        if !(ruling && interval.min() == 0.0 && interval.max() == 1.0) {
+            return Ok(None);
+        }
+        let start = seam.evaluate_point(kernel, interval.min())?;
+        let end = seam.evaluate_point(kernel, interval.max())?;
+        Ok(((end - start).length() > EFF_ZERO)
+            .then(|| Curve::from(Line::from_points(start, end, 3))))
+    }
+
     /// The line from `start_uv` to `end_uv` in the surface's parameter space, as a 3d
     /// curve on the surface (`CreateLineOnSurf`): a dimension-2 [`Line`] over `[0, 1]`
     /// on this surface, over its natural UV domain (owner flag 1: the line copied).
@@ -1487,6 +1535,45 @@ impl Surface {
         Ok(solutions)
     }
 
+    /// [`Surface::global_point_solve_point_test_off`] with why an empty answer is empty
+    /// (#23057): [`EmptyAnswer::NoPointWithinTarget`] only when the global solve proved
+    /// that no point of the surface lies within `opt_target_distance`
+    /// ([`Surface::global_point_solve_1_answer`]); an empty answer is otherwise
+    /// [`EmptyAnswer::Unproved`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Surface::global_point_solve`].
+    pub(crate) fn global_point_solve_point_test_off_answer<O: SolutionObject>(
+        &self,
+        k: &Kernel,
+        surface: Option<O>,
+        uv_domain: &Extent2d,
+        op: SolverOperation,
+        test_point: Point3,
+        src_zone_tol_3d: f64,
+        opt_target_distance: Option<f64>,
+        requested: SolutionRequested,
+    ) -> Result<(SolutionArray<O>, EmptyAnswer)> {
+        let mut solutions = SolutionArray::new();
+        let answer = self.global_point_solve_in(
+            k,
+            surface,
+            None,
+            None,
+            uv_domain,
+            op,
+            test_point,
+            src_zone_tol_3d,
+            opt_target_distance,
+            requested,
+            &mut solutions,
+            None,
+            true,
+        )?;
+        Ok((solutions, answer))
+    }
+
     /// [`Surface::global_point_solve_point_test_off`] with upstream's out-parameter, as
     /// [`Surface::global_point_solve_into`]: `solutions` keeps what was found when the
     /// call fails (for callers that ignore the status).
@@ -1521,6 +1608,7 @@ impl Surface {
             None,
             true,
         )
+        .map(|_| ())
     }
 
     /// [`Surface::global_point_solve`] with upstream's out-parameter: `solutions` keeps
@@ -1557,6 +1645,7 @@ impl Surface {
             None,
             false,
         )
+        .map(|_| ())
     }
 
     /// [`Surface::global_point_solve_into`] with lazy owning-face topology for
@@ -1595,6 +1684,7 @@ impl Surface {
             None,
             false,
         )
+        .map(|_| ())
     }
 
     /// [`Surface::global_point_solve_into_with_context`] with the surface cache's point
@@ -1634,6 +1724,7 @@ impl Surface {
             None,
             true,
         )
+        .map(|_| ())
     }
 
     /// [`Surface::global_point_solve`] of a face's surface by a caller that holds the
@@ -1694,7 +1785,7 @@ impl Surface {
         solutions: &mut SolutionArray<O>,
         face_test: Option<FaceTest<'_>>,
         point_test_off: bool,
-    ) -> Result<()> {
+    ) -> Result<EmptyAnswer> {
         // init output
         *solutions = SolutionArray::new();
 
@@ -1828,7 +1919,7 @@ impl Surface {
                 }
 
                 if !solutions.is_empty() {
-                    return Ok(()); // all done
+                    return Ok(EmptyAnswer::Unproved); // all done
                 }
             }
         }
@@ -1838,11 +1929,12 @@ impl Surface {
         // MAXIMIZE, but always for DIRECTED.
         let use_new =
             (op != SolverOperation::Maximize) || op == SolverOperation::Signed3dDirectedMaximize;
+        let mut answer = EmptyAnswer::Unproved;
         *solutions = if use_new {
             // upstream's seam solutions name this surface, whose natural UV domain
             // IsEqual (AddSortedSolution) reads: solve naming a stand-in for it, and
             // return the solutions without objects, as before
-            self.global_point_solve_1(
+            let (found, why) = self.global_point_solve_1_answer(
                 k,
                 uv_domain,
                 op,
@@ -1851,8 +1943,9 @@ impl Surface {
                 opt_target_distance,
                 requested,
                 Some(OperandObject::Surface(0, self.stand_in_key_domain(k)?)),
-            )?
-            .without_objects()
+            )?;
+            answer = why;
+            found.without_objects()
         } else if let Some(surface) = surface {
             self.global_point_solve_0_in(
                 k,
@@ -1893,11 +1986,15 @@ impl Surface {
                     num_objects: s.num_objects,
                     objects: [None; MAX_TREES],
                     nodes: s.nodes,
+                    contact: s.contact,
+                    unique: s.unique,
+                    shared_contact: s.shared_contact,
+                    limit_root: s.limit_root,
                 });
             }
             out
         };
-        Ok(())
+        Ok(answer)
     }
 }
 
@@ -2090,7 +2187,7 @@ pub fn classify_curve_surface_xsect_point_with(
     // get the cosine of the angle between the surfaceSectionNormal plane and the plane
     // of the curve's osculating circle (needed for Meusnier's Theorem)
     let ang_rad = curve_binormal.angle_between(surface_normal)?;
-    let cos_phi = (ang_rad - PI / 2.0).cos().abs();
+    let cos_phi = det::cos(ang_rad - PI / 2.0).abs();
 
     // characterize the curve shape as a circle or a line
     let mut curve_line: bool;
@@ -2595,6 +2692,91 @@ mod tests {
         assert!(!r.found_guess);
     }
 
+    /// `seam` and `curve` agree at 65 parameters across the seam's interval, to 1e-12 of
+    /// the seam's size: one curve, parameter for parameter.
+    fn same_curve(k: &Kernel, seam: &CrvOnSurf, curve: &Curve) {
+        let ivl = seam.natural_interval();
+        let (a, z) = (
+            seam.evaluate_point(k, ivl.min()).unwrap(),
+            seam.evaluate_point(k, ivl.max()).unwrap(),
+        );
+        let size = 1.0 + (z - a).length() + a.length();
+        for i in 0..=64 {
+            let t = ivl.min() + (ivl.max() - ivl.min()) * f64::from(i) / 64.0;
+            let d =
+                (seam.evaluate_point(k, t).unwrap() - curve.evaluate_point(k, t).unwrap()).length();
+            assert!(d <= 1e-12 * size, "t {t}: {d}");
+        }
+    }
+
+    /// tangency-labs/solidcraft#11574: a native cone's or cylinder's seam runs along a
+    /// ruling, a line that is the seam curve on the surface parameter for parameter,
+    /// whichever NURB direction is the sweep, inside out or not, bounded or not. A
+    /// sphere's and a torus's seams have none.
+    #[test]
+    fn a_cones_seam_is_its_ruling_as_a_line_parameter_for_parameter() {
+        use crate::geom::axis2_placement::Axis2Placement;
+        use crate::surface::cone::Cone;
+        use crate::surface::sphere::Sphere;
+        use crate::surface::torus::{Torus, TorusOptions};
+        let k = Kernel::default();
+        let frame =
+            Axis2Placement::new(Vec3::new(1.0, -2.0, 3.0), Vec3::new(0.0, 0.6, 0.8), Vec3::X);
+        // (bottom radius, top radius or semi-angle, height): a cylinder, a cone, an
+        // infinite cylinder and an infinite cone (a height not above 0)
+        let shapes = [
+            (2.0, 2.0, 3.0),
+            (2.0, 0.5, 3.0),
+            (2.0, 0.0, 0.0),
+            (2.0, 20.0, 0.0),
+        ];
+        let mut lines = 0;
+        for (bottom, top, height) in shapes {
+            for swap_uv in [false, true] {
+                for inside_out in [false, true] {
+                    let cone = Cone::create_canonical(
+                        &k, &frame, bottom, top, height, swap_uv, inside_out,
+                    )
+                    .unwrap();
+                    let s = Surface::from(cone);
+                    let mut seams = 0;
+                    for param in [SurfParamType::U, SurfParamType::V] {
+                        let Some(seam) = s.create_seam_curve(&k, param, false).unwrap() else {
+                            continue;
+                        };
+                        seams += 1;
+                        let case = format!("{bottom} {top} {height} swap {swap_uv} inside out {inside_out} {param:?}");
+                        let line = s.seam_ruling(&k, param, &seam).unwrap();
+                        let line = line.unwrap_or_else(|| panic!("{case}: a ruling"));
+                        assert!(line.is_analytic(), "{case}: a line");
+                        assert_eq!(line.natural_interval(), seam.natural_interval(), "{case}");
+                        same_curve(&k, &seam, &line);
+                        lines += 1;
+                    }
+                    assert_eq!(
+                        seams, 1,
+                        "{bottom} {top} {height} {swap_uv} {inside_out}: one seam, the sweep's"
+                    );
+                }
+            }
+        }
+        assert_eq!(lines, 16);
+        let sphere = Surface::from(Sphere::create_canonical(&k, &frame, 2.0).unwrap());
+        let torus = Surface::from(
+            Torus::create_canonical(&k, &frame, 3.0, 1.0, TorusOptions::default(), None).unwrap(),
+        );
+        for s in [&sphere, &torus] {
+            for param in [SurfParamType::U, SurfParamType::V] {
+                if let Some(seam) = s.create_seam_curve(&k, param, false).unwrap() {
+                    assert!(
+                        s.seam_ruling(&k, param, &seam).unwrap().is_none(),
+                        "{param:?}: no ruling"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_plane_has_no_seam() {
         let k = Kernel::new(&crate::kernel::KernelOptions::default());
@@ -2807,7 +2989,8 @@ mod tests {
                 None,
             )
             .unwrap()
-            .expect("the tree solve answers");
+            .expect("the tree solve answers")
+            .0;
         check(on_face.as_slice(), "the tree solve on a face's surface");
         assert_eq!(owned.owner(), Some(owner));
         assert!(!owned.has_trim_cache());

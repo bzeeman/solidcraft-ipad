@@ -27,7 +27,7 @@
 //! [`pick`] (the edge or vertex nearest a point), [`boolean`], [`stitch`], [`prism`] (planar
 //! region booleans and extrusion, prism sections),
 //! [`cell_grid`] (the cells of a grid over a profile), [`profile`] (line families clipped to a
-//! region).
+//! region), [`shaft_spline`] (the outlines of a splined shaft and its hub from plain numbers).
 //!
 //! Operations change the body they are given, as the kernel does. An application that keeps
 //! its input copies it first ([`Body::copy`]).
@@ -41,6 +41,7 @@ pub mod bead;
 pub mod blend;
 pub mod blend_definition;
 pub mod blend_surface;
+pub mod board_drill;
 pub mod body;
 pub mod boolean;
 pub mod bspline;
@@ -59,34 +60,43 @@ pub mod curve_knots;
 pub mod curve_plane;
 pub mod cylinder_wall;
 pub mod develop;
+pub mod dogbone;
+pub mod dome;
 pub mod dxf;
 pub mod error;
 pub mod extend;
+pub mod extended_levels;
 pub mod face_pair;
 pub mod face_surface;
 pub mod faceted;
 pub mod facing_trough;
 pub mod file;
+pub mod finger_joint;
 pub mod fit_projection;
+pub mod footprint;
 pub mod frame_gusset;
 pub mod frame_member;
 pub mod frame_trim;
 pub mod fuel;
+pub mod gap_wedge;
 pub mod heal;
 pub mod history;
 pub mod hlr;
+pub mod hole_spacing;
 pub mod hole_stacks;
 pub mod joint_turn;
 pub mod label;
 pub mod measure;
-pub mod member_turn;
+pub mod mesh;
 pub mod mid_joint;
 pub mod mid_sheet;
+pub mod morph;
 pub mod network;
 pub mod offset;
 pub mod order;
 pub mod outline;
 pub mod paper_gaps;
+pub mod path_plane;
 pub mod pcurve;
 pub mod pick;
 pub mod point_identity;
@@ -95,16 +105,27 @@ pub mod profile;
 pub mod provenance;
 pub mod query;
 pub mod record_check;
+pub mod round_face;
+pub mod ruled_strip;
+pub mod scan_align;
+pub mod section_corners;
 pub mod session;
+pub mod shaft_spline;
+pub mod sketch_arc;
 pub mod spline_projection;
 pub mod split;
 pub mod step_assembly;
 pub mod stitch;
+pub mod stop;
+pub mod stroke_runs;
 pub mod surface;
 pub mod surface_cvs;
+pub mod surface_intersection;
 pub mod sweep;
+pub mod sweep_definition;
 pub mod tangent;
 pub mod trim;
+pub mod tube_cope;
 pub mod untrim;
 pub mod vertex_meet;
 
@@ -124,6 +145,7 @@ pub use blend::edge_faces_along;
 pub use blend::edge_faces_along_ordered;
 pub use blend::edges_share_wedge;
 pub use blend::fillet_variable;
+pub use blend::fillet_variable_chain_from;
 pub use blend::fillet_variable_from;
 pub use blend::fillet_variable_from_with;
 pub use blend::fillet_variable_ordered;
@@ -159,6 +181,7 @@ pub use check::CheckReport;
 pub use contact::flush_contact_points;
 pub use contact::Gap;
 pub use error::Error;
+pub use error::ErrorClass;
 pub use error::FailureCode;
 pub use error::FitKind;
 pub use error::OffsetRefusal;
@@ -186,6 +209,7 @@ pub use measure::FaceCentroid;
 pub use measure::FaceRayHit;
 pub use measure::GapSample;
 pub use measure::MassPropertiesEstimate;
+pub use measure::MaterialSides;
 pub use measure::MembersClosest;
 pub use measure::Normal;
 pub use measure::PointClass;
@@ -214,7 +238,7 @@ pub fn reduce_mesh(
     corner_normals: Option<&[[f64; 3]]>,
     target_triangles: usize,
 ) -> Result<ReducedMesh> {
-    solidcore::mesh_reduce::reduce_mesh_with_cancel(
+    solidcore::mesh_reduce::reduce_mesh_normalized_outward_with_cancel(
         positions,
         indices,
         corner_normals,
@@ -226,6 +250,8 @@ pub fn reduce_mesh(
 
 #[cfg(test)]
 mod ball_corner_tests;
+#[cfg(test)]
+mod dome_tests;
 #[cfg(test)]
 mod noisy_round_tests;
 #[cfg(test)]

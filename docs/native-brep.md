@@ -142,6 +142,7 @@ Natural normals are ∂S/∂u × ∂S/∂v.
 | `torus` {frame, major_radius, minor_radius} | origin + (R + r cos v)(cos u x + sin u y) + r sin v z | longitude, periodic | meridian angle, periodic |
 | `ball_patch` {center, radius} | its `nurbs`: a label with no (u, v) of its own | its form's | its form's |
 | `blend` {definition} | its `nurbs`: a round by its definition, with no (u, v) of its own | its form's | its form's |
+| `sweep` {definition} | its `nurbs`: a screw-swept wall (a thread's flank, a coil) by its definition, with no (u, v) of its own | its form's | its form's |
 | `spline` {u_knots, v_knots, points} | tensor-product B-spline, `points[i][j]` with i along u | u knot domain | v knot domain |
 | `rational_spline` {u_knots, v_knots, homogeneous} | the same, homogeneous coefficients | u knot domain | v knot domain |
 | `placed_revolution` {profile, origin, axis, matrix, forward} | M · R(angle) · profile(s): the profile revolved about origin and unit axis by the right-hand rule, then mapped by the column-major affine matrix M | `forward`: s, the profile's parameter; else the angle | `forward`: the angle, [0, 2π); else s |
@@ -161,6 +162,15 @@ then in the NURBS's (u, v), its natural normal is the NURBS's, and `surface`
 only says what the face is (axis, radius). Pcurves on such a face are SMLib's
 own trims, with nothing fitted. A STEP writer writes the analytic surface and
 the face's edges without pcurves.
+
+A face whose surface has no kind here, SMLib's implicit offset surface, is
+written as a `spline` that stands in for it, as SMLib's export writes it. The
+spline lies within half the face's tolerance of the surface, which is never
+more than the tolerance the record gives the face (the least of its edges' and
+the body's): for an offset, the kernel's net of it, certified within that at
+every parameter; for a surface the kernel cannot certify, a fit checked at
+samples. An export that cannot fit the surface that closely fails, rather than
+write a face that lies outside its tolerance (#21926).
 
 A `ball_patch` face always carries `nurbs`: the rational patch on the sphere of
 `center` and `radius` that SMLib makes at the corner of three equal rounds
@@ -182,6 +192,20 @@ net in the definition. The kernel builds the face on its net, makes the
 definition from the record and certifies the net against it again before the
 face is an operand, refusing a net it does not certify. The flat arrays carry
 the net alone. A STEP writer writes the net as the face's B-spline surface.
+
+A `sweep` face always carries `nurbs`, its net: the rational B-spline wall of a
+profile carried by a screw motion, whose definition the record keeps
+(`solidcore_record::brep::sweep`): the profile (a 3D spline or rational spline),
+the motion (an axis through a point, a signed pitch per turn, positive
+right-handed, and an optional radial law, piecewise linear in the angle, for a
+taper or a run-out), the stations and one half angle per span that fix the
+net's parameter across the turns, and the map from the face's (u, v) to the
+definition's, and the net's distance from the definition as the kernel held it.
+The face's (u, v) are the net's. That distance is never taken as proof. solidcore
+builds the face on its net and keeps the definition as the wall's label, which
+no evaluation reads, and writes it back with the net. A STEP
+writer, with no helicoid entity, writes the net as the face's B-spline surface,
+pcurves included. See docs/design/screw-surface-record.md.
 
 ### Parameter ranges
 

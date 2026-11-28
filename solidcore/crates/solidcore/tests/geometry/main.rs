@@ -21,6 +21,8 @@ mod arena_uv_trim_owner;
 mod assert_valid_level0_helpers;
 #[path = "../brep_query_cache_lifetime.rs"]
 mod brep_query_cache_lifetime;
+#[path = "../check_memo_incremental.rs"]
+mod check_memo_incremental;
 #[path = "../constructed_transforms.rs"]
 mod constructed_transforms;
 #[path = "../contact_between_bodies.rs"]
@@ -183,6 +185,8 @@ mod sphere_drop_spans_certified;
 mod subdivide_face_v_knots;
 #[path = "../tangent_edge.rs"]
 mod tangent_edge;
+#[path = "../tight_box_planar_face_edges.rs"]
+mod tight_box_planar_face_edges;
 #[path = "../trim_boundary_seam_wrap.rs"]
 mod trim_boundary_seam_wrap;
 #[path = "../ub_285_nurb_fillet_shell.rs"]

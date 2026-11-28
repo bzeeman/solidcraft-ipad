@@ -25,7 +25,8 @@
 //! `ok_to_make_uv_trim_curve = FALSE`, so the `const` validation no longer stores a
 //! new UV trim curve on a neighbour that had none. The 3D evaluation, its drop onto
 //! the existing face and every status are kept.
-use super::{invalid, required, Object, Reports, ERROR, SUCCESS};
+use super::spatial::SpatialIndex;
+use super::{invalid, required, Object, Reports};
 use crate::curve::curve::Curve;
 use crate::error::{EntityRef, Result};
 use crate::geom::assert_array::{AssertArray, AssertReport, ReportSpec};
@@ -359,10 +360,31 @@ fn preflight(b: &Brep, r: &mut Reports<'_>, cache: &mut Lists) -> Result<bool> {
     Ok(true)
 }
 
+/// What [`validate_pointers`] concluded about a body's topology links.
+///
+/// Ordinary failed checks are reports in the report array, not a different result: a pass
+/// that only added reports is still [`PointerCheck::Passed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PointerCheck {
+    /// Every required link was walked; failed checks, if any, are in the reports.
+    Passed,
+    /// A required link was missing before the walk (the preflight, or an edgeuse owned by
+    /// nothing live), or the geometric vertex exclusion failed with no report array to hold it.
+    Failed,
+    /// The walk stopped at a missing link it had just reported, before checking the rest.
+    StoppedEarly,
+}
+
+impl PointerCheck {
+    /// Whether the check passed.
+    pub fn is_passed(self) -> bool {
+        self == PointerCheck::Passed
+    }
+}
+
 /// Runs `SmBrep::ValidatePointers`, appending its failed reports in native order.
-/// `walk` skips `CheckFace`'s loop checks, as `SM_WALK` does. The returned integer
-/// preserves native `SM_SUCCESS` (1000), required-pointer failure (1001), and the
-/// early boolean return (0). Ordinary failed checks are reports, not an error status.
+/// `walk` skips `CheckFace`'s loop checks, as `SM_WALK` does. Ordinary failed checks
+/// are reports, not a failed result; see [`PointerCheck`] for what each result means.
 /// Geometric exclusion also returns failure when the caller omits the report array.
 /// `keys` supplies the caller's topology identities used by curve-owner checks.
 /// `level` is the native `SM_LEVEL_0` through `SM_LEVEL_GIVEN` (0 through 4).
@@ -373,7 +395,7 @@ pub fn validate_pointers(
     level: u8,
     walk: bool,
     keys: &dyn Fn(EntityRef) -> crate::geom::object::ObjectRef,
-) -> Result<i32> {
+) -> Result<PointerCheck> {
     Ok(validate_pointers_excluding(k, b, reports, level, walk, keys, true)?.0)
 }
 
@@ -393,7 +415,7 @@ pub(crate) fn validate_pointers_excluding(
     walk: bool,
     keys: &dyn Fn(EntityRef) -> crate::geom::object::ObjectRef,
     repair_ends: bool,
-) -> Result<(i32, bool)> {
+) -> Result<(PointerCheck, bool)> {
     validate_pointers_traced(k, b, reports, level, walk, keys, &mut true, repair_ends)
 }
 
@@ -410,7 +432,7 @@ pub(crate) fn validate_pointers_traced(
     keys: &dyn Fn(EntityRef) -> crate::geom::object::ObjectRef,
     faces_whole: &mut bool,
     repair_ends: bool,
-) -> Result<(i32, bool)> {
+) -> Result<(PointerCheck, bool)> {
     if level > 4 {
         return Err(invalid("invalid assert test level"));
     }
@@ -420,7 +442,7 @@ pub(crate) fn validate_pointers_traced(
     };
     let mut cache = Lists::new(b);
     if !preflight(b, &mut r, &mut cache)? {
-        return Ok((ERROR, false));
+        return Ok((PointerCheck::Failed, false));
     }
     r.check(
         b,
@@ -452,7 +474,7 @@ pub(crate) fn validate_pointers_traced(
             };
             if !ok {
                 r.check(b, 98, false, EntityRef::Edgeuse(eu))?;
-                return Ok((ERROR, false));
+                return Ok((PointerCheck::Failed, false));
             }
         }
     }
@@ -488,22 +510,30 @@ pub(crate) fn validate_pointers_traced(
         // evaluates its curves and surface (solidcore#3247)
         k.check_cancelled("topology::brep::validation::pointers::validate_pointers")?;
         let tol = b.face(f)?.tolerance;
-        let on = if crate::topology::trimming_tools::face_uv_curves_present(b, f)? {
-            &mut *b
+        // not upstream: a face whose neighbourhood passed this check on a body before
+        // passes it again ([`crate::geom::check_memo`])
+        let clean = crate::geom::check_memo::face_clean(k, f);
+        let on = if clean {
+            None
+        } else if crate::topology::trimming_tools::face_uv_curves_present(b, f)? {
+            Some(&mut *b)
         } else {
-            match &mut standing {
+            Some(match &mut standing {
                 Some(copy) => copy,
                 none => none.insert(b.clone_standing_for_self()?),
-            }
+            })
         };
-        let checked = crate::topology::trimming_tools::check_face(
-            k,
-            on,
-            f,
-            tol,
-            r.array.as_deref_mut(),
-            walk,
-        );
+        let checked = match on {
+            Some(on) => crate::topology::trimming_tools::check_face(
+                k,
+                on,
+                f,
+                tol,
+                r.array.as_deref_mut(),
+                walk,
+            ),
+            None => Ok(()),
+        };
         if let Err(e) = checked {
             if e.is_unported_or_cancelled() {
                 return Err(e);
@@ -530,7 +560,7 @@ pub(crate) fn validate_pointers_traced(
         }
         let Some(fu) = face.faceuse else {
             r.check(b, 12, false, EntityRef::Face(f))?;
-            return Ok((0, false));
+            return Ok((PointerCheck::StoppedEarly, false));
         };
         r.check(b, 13, true, EntityRef::Faceuse(fu))?;
         r.check(
@@ -541,7 +571,7 @@ pub(crate) fn validate_pointers_traced(
         )?;
         let Some(fum) = b.faceuse(fu)?.mate else {
             r.check(b, 15, false, EntityRef::Faceuse(fu))?;
-            return Ok((0, false));
+            return Ok((PointerCheck::StoppedEarly, false));
         };
         for (i, ok, owner) in [
             (16, true, EntityRef::Faceuse(fum)),
@@ -564,11 +594,11 @@ pub(crate) fn validate_pointers_traced(
         }
         let Some(s1) = b.faceuse(fu)?.shell else {
             r.check(b, 23, false, EntityRef::Faceuse(fu))?;
-            return Ok((0, false));
+            return Ok((PointerCheck::StoppedEarly, false));
         };
         let Some(s2) = b.faceuse(fum)?.shell else {
             r.check(b, 24, false, EntityRef::Faceuse(fum))?;
-            return Ok((0, false));
+            return Ok((PointerCheck::StoppedEarly, false));
         };
         for (i, ok, s) in [
             (25, true, s1),
@@ -587,11 +617,11 @@ pub(crate) fn validate_pointers_traced(
             r.check(b, 29, loop_face == f, EntityRef::Loop(l))?;
             let Some(lu) = b.loop_(l)?.loopuse else {
                 r.check(b, 30, false, EntityRef::Loop(l))?;
-                return Ok((0, false));
+                return Ok((PointerCheck::StoppedEarly, false));
             };
             let Some(lum) = b.loopuse(lu)?.mate else {
                 r.check(b, 31, false, EntityRef::Loop(l))?;
-                return Ok((0, false));
+                return Ok((PointerCheck::StoppedEarly, false));
             };
             for (i, owner) in [
                 (32, EntityRef::Loop(l)),
@@ -656,7 +686,7 @@ pub(crate) fn validate_pointers_traced(
                 }
                 if !matches!(b.loopuse(this)?.start, LoopuseStart::Edgeuse(Some(_))) {
                     r.check(b, missing, false, EntityRef::Loopuse(this))?;
-                    return Ok((0, false));
+                    return Ok((PointerCheck::StoppedEarly, false));
                 }
                 for eu in cache.walk(b, this)? {
                     r.check(b, offset, true, EntityRef::Edgeuse(eu))?;
@@ -776,7 +806,7 @@ pub(crate) fn validate_pointers_traced(
             let list = &b.faceuse(this)?.loopuses;
             let Some(&first) = list.first() else {
                 r.check(b, missing, false, EntityRef::Faceuse(this))?;
-                return Ok((0, false));
+                return Ok((PointerCheck::StoppedEarly, false));
             };
             r.check(
                 b,
@@ -842,9 +872,9 @@ pub(crate) fn validate_pointers_traced(
     r.failed |= !topology_intact;
     // Without a report array the status is the caller's only refusal signal.
     if exclusion_failed && r.array.is_none() {
-        return Ok((ERROR, true));
+        return Ok((PointerCheck::Failed, true));
     }
-    Ok((SUCCESS, exclusion_failed))
+    Ok((PointerCheck::Passed, exclusion_failed))
 }
 
 fn check_edges(
@@ -1757,13 +1787,74 @@ fn check_vertex_clearance(
     if vertices.is_empty() {
         return Ok(());
     }
+    let mut vertex_balls = Vec::new();
+    let mut vertex_boxes = Vec::new();
+    for &v in vertices {
+        let vertex = b.vertex(v)?;
+        let point = vertex.point;
+        let radius = vertex.tolerance;
+        let bbox = (point.x.is_finite()
+            && point.y.is_finite()
+            && point.z.is_finite()
+            && radius.is_finite()
+            && radius >= 0.0)
+            .then(|| {
+                let bounds = |c: f64| {
+                    let margin = radius + 4.0 * f64::EPSILON * (c.abs() + radius);
+                    (c - margin, c + margin)
+                };
+                let (x0, x1) = bounds(point.x);
+                let (y0, y1) = bounds(point.y);
+                let (z0, z1) = bounds(point.z);
+                Extent3d::from_bounds(x0, y0, z0, x1, y1, z1)
+            });
+        vertex_balls.push((point, radius));
+        vertex_boxes.push(bbox);
+    }
+    let vertex_index = SpatialIndex::new(vertex_boxes);
     let mut caches = FaceCaches::new();
     let mut neighbourhoods = BTreeMap::new();
     let mut excluded = BTreeSet::new();
     for f in b.face_list().to_vec() {
+        k.check_cancelled("topology::brep::validation::vertex_exclusion")?;
+        if b.face(f)?.surface.is_none() {
+            // The missing surface has already been reported by the pointer check.
+            continue;
+        }
+        let bbox = exclusion_probe(crate::query::face::p1::calculate_bounding_box(
+            k, &mut *b, f, false,
+        ))?
+        .filter(Extent3d::is_defined);
+        let candidates = match bbox {
+            Some(bounds) => vertex_index.boxes_in_box(&bounds, 0.0),
+            None => (0..vertices.len()).collect(),
+        };
+        let active: Vec<usize> = candidates
+            .into_iter()
+            .filter(|&idx| {
+                let (Some(&v), Some(&(point, radius))) = (vertices.get(idx), vertex_balls.get(idx))
+                else {
+                    return false;
+                };
+                if excluded.contains(&v) {
+                    return false;
+                }
+                // Proven clear: the face's box is at least the ball's radius away.
+                !bbox.is_some_and(|bounds| box_distance(&bounds, point) >= radius)
+            })
+            .collect();
+        if active.is_empty() {
+            continue;
+        }
         let incident: BTreeSet<_> = crate::topology::face::p4::vertices(b, f, None, false, None)?
             .into_iter()
             .collect();
+        if active
+            .iter()
+            .all(|&idx| vertices.get(idx).is_none_or(|v| incident.contains(v)))
+        {
+            continue;
+        }
         let face_edges = crate::topology::face::p4::edges(b, f, None, false, None)?;
         let mut vertex_loops = Vec::new();
         for lu in crate::topology::face::p4::upward_loopuses(b, f, false, None)? {
@@ -1774,23 +1865,16 @@ fn check_vertex_clearance(
             }
         }
         let Some(surface) = b.face(f)?.surface.as_ref() else {
-            // The missing surface has already been reported by the pointer check.
             continue;
         };
         let surface = exclusion_probe(surface.clone_for_evaluation())?;
-        let bbox = exclusion_probe(crate::query::face::p1::calculate_bounding_box(
-            k, &mut *b, f, false,
-        ))?
-        .filter(Extent3d::is_defined);
-        for &v in vertices {
+        for idx in active {
             k.check_cancelled("topology::brep::validation::vertex_exclusion")?;
-            if incident.contains(&v) || excluded.contains(&v) {
+            let (Some(&v), Some(&(point, radius))) = (vertices.get(idx), vertex_balls.get(idx))
+            else {
                 continue;
-            }
-            let point = b.vertex(v)?.point;
-            let radius = b.vertex(v)?.tolerance;
-            // Proven clear: the face's box is at least the ball's radius away.
-            if bbox.is_some_and(|bbox| box_distance(&bbox, point) >= radius) {
+            };
+            if incident.contains(&v) || excluded.contains(&v) {
                 continue;
             }
             if let std::collections::btree_map::Entry::Vacant(entry) = neighbourhoods.entry(v) {
@@ -1867,8 +1951,7 @@ fn check_vertex_clearance(
         }
     }
     for e in b.edge_list().to_vec() {
-        let first = edge::vertex(b, e)?;
-        let last = edge::other_vertex(b, e, first)?;
+        k.check_cancelled("topology::brep::validation::vertex_exclusion")?;
         let data = b.edge(e)?;
         let Some(curve) = data.curve.as_ref() else {
             continue;
@@ -1880,19 +1963,41 @@ fn check_vertex_clearance(
                 bbox.expand_absolute(tol::zone_tol3d(k, data.tolerance));
                 bbox
             });
-        for &v in vertices {
+        let candidates = match bbox {
+            Some(bounds) => vertex_index.boxes_in_box(&bounds, 0.0),
+            None => (0..vertices.len()).collect(),
+        };
+        let active: Vec<usize> = candidates
+            .into_iter()
+            .filter(|&idx| {
+                let (Some(&v), Some(&(point, radius))) = (vertices.get(idx), vertex_balls.get(idx))
+                else {
+                    return false;
+                };
+                if excluded.contains(&v) {
+                    return false;
+                }
+                !bbox.is_some_and(|bounds| box_distance(&bounds, point) >= radius)
+            })
+            .collect();
+        if active.is_empty() {
+            continue;
+        }
+        let first = edge::vertex(b, e)?;
+        let last = edge::other_vertex(b, e, first)?;
+        for idx in active {
             k.check_cancelled("topology::brep::validation::vertex_exclusion")?;
-            if Some(v) == first || Some(v) == last || excluded.contains(&v) {
+            let (Some(&v), Some(&(point, radius))) = (vertices.get(idx), vertex_balls.get(idx))
+            else {
                 continue;
-            }
-            let vertex = b.vertex(v)?;
-            if bbox.is_some_and(|bbox| box_distance(&bbox, vertex.point) >= vertex.tolerance) {
+            };
+            if Some(v) == first || Some(v) == last || excluded.contains(&v) {
                 continue;
             }
             let drop = exclusion_probe(curve.drop_point(
                 k,
                 &data.interval,
-                vertex.point,
+                point,
                 None,
                 b.tolerance(),
                 None,
@@ -1903,7 +2008,7 @@ fn check_vertex_clearance(
                 excluded.insert(v);
                 continue;
             };
-            if drop.distance <= vertex.tolerance {
+            if drop.distance <= radius {
                 if let std::collections::btree_map::Entry::Vacant(entry) = neighbourhoods.entry(v) {
                     let Some(local) = exclusion_probe(vertex_neighbourhood_edges(k, b, v))? else {
                         report_vertex_exclusion(b, r, v, EntityRef::Edge(e), None)?;
@@ -1920,14 +2025,7 @@ fn check_vertex_clearance(
                 }
                 report_vertex_exclusion(b, r, v, EntityRef::Edge(e), Some(drop.distance))?;
                 excluded.insert(v);
-            } else if !curve_clears(
-                k,
-                curve,
-                &data.interval,
-                data.tolerance,
-                vertex.point,
-                vertex.tolerance,
-            )? {
+            } else if !curve_clears(k, curve, &data.interval, data.tolerance, point, radius)? {
                 // the solve found no contact but boxes cannot prove there is none
                 report_vertex_exclusion(b, r, v, EntityRef::Edge(e), None)?;
                 excluded.insert(v);
@@ -2272,6 +2370,19 @@ fn edge_geometry(
     let vu = required(b.edgeuse(eu)?.vertexuse)?;
     let start = required(b.vertexuse(vu)?.vertex)?;
     let end = required(edge::other_vertex(b, e, Some(start))?)?;
+    // not upstream: an edge whose neighbourhood passed this check on a body before, with
+    // no report and no warning, gives the same geometry answers and has no end that turns
+    // back ([`crate::geom::check_memo`]); only its curve's owner is checked again
+    if !fix_tolerances && !repair_ends && crate::geom::check_memo::edge_clean(k, e) {
+        let curve = required(b.edge(e)?.curve.as_ref())?;
+        if curve.owner() != Some(keys(EntityRef::Edge(e))) {
+            return Err(crate::SolidError::topology(
+                super::OP,
+                crate::error::topology::TopologyFailure::CurveNotOwnedByEdge,
+            ));
+        }
+        return Ok(false);
+    }
     let mut turned_back = false;
     if !repair_ends {
         turned_back |= ends_turned_back(k, required(b.edge(e)?.curve.as_ref())?, None)?;
@@ -2368,6 +2479,7 @@ fn edge_geometry(
 mod issue_891_tests {
     use super::*;
     use crate::curve::curve::{Curve, CurveKind};
+    use crate::math::det;
     use crate::nurbs::b_spline_curve::p1::{
         BSplineCurve, BSplineCurveForm, CanonicalData, KnotType,
     };
@@ -2382,8 +2494,8 @@ mod issue_891_tests {
         let point = |deg: f64, scale: f64| {
             let t = deg.to_radians();
             Vec3::new(
-                (cx + scale * r * t.cos()) / 60.0,
-                (cy + scale * r * t.sin()) / 4.0,
+                (cx + scale * r * det::cos(t)) / 60.0,
+                (cy + scale * r * det::sin(t)) / 4.0,
                 0.0,
             )
         };
@@ -2870,7 +2982,7 @@ mod issue_891_tests {
 
     /// `ValidatePointers` on [`half_disc`]: its status and the arc trims' middle
     /// control points before and after.
-    fn validate_half_disc() -> (i32, Vec<Vec3>, Vec<Vec3>) {
+    fn validate_half_disc() -> (PointerCheck, Vec<Vec3>, Vec<Vec3>) {
         let mut k = Kernel::default();
         let mut b = half_disc(&mut k);
         let before = rational_trim_middles(&mut b);
@@ -2887,7 +2999,7 @@ mod issue_891_tests {
     #[test]
     fn issue_891_kernel_fix_keeps_the_exact_trim() {
         let (status, before, after) = validate_half_disc();
-        assert_eq!(status, SUCCESS);
+        assert_eq!(status, PointerCheck::Passed);
         assert_eq!(before.len(), 2);
         assert_eq!(after, before);
         assert_eq!(after[0], middle_control_point(&mut trim()));
@@ -3081,10 +3193,10 @@ mod issue_891_tests {
                 .collect()
         }
 
-        type ReversalRun = (i32, Vec<EdgeuseId>, Vec<(EdgeuseId, Vec<Vec3>)>);
+        type ReversalRun = (PointerCheck, Vec<EdgeuseId>, Vec<(EdgeuseId, Vec<Vec3>)>);
 
         struct Run {
-            status: i32,
+            status: PointerCheck,
             before: Vec<EdgeuseId>,
             after: Vec<EdgeuseId>,
             arc_before: Vec<(EdgeuseId, Vec<Vec3>)>,
@@ -3134,7 +3246,7 @@ mod issue_891_tests {
             }
 
             let no_new = run();
-            assert_eq!(no_new.status, SUCCESS);
+            assert_eq!(no_new.status, PointerCheck::Passed);
 
             // No chord trim is made, and nothing present is removed.
             assert_eq!(
@@ -3193,7 +3305,7 @@ mod issue_891_tests {
         fn wr446_all_trims_present_is_inert() {
             let (s0, t0, g0) = all_present_run();
             let (s1, t1, g1) = all_present_run();
-            assert_eq!(s0, SUCCESS);
+            assert_eq!(s0, PointerCheck::Passed);
             assert_eq!(s0, s1);
             assert_eq!(t0, t1);
             assert_eq!(g0, g1);
@@ -3209,7 +3321,7 @@ mod issue_891_tests {
             let before = b.edgeuses().iter().count();
             let mut reports = AssertArray::new();
             let status = validate_pointers(&k, &mut b, Some(&mut reports), 2, true, &key).unwrap();
-            assert_eq!(status, SUCCESS);
+            assert_eq!(status, PointerCheck::Passed);
             assert!(reports.is_empty(), "{:?}", reports.reports());
             assert!(
                 trimmed_edgeuses(&b).is_empty(),
@@ -3217,5 +3329,69 @@ mod issue_891_tests {
             );
             assert_eq!(b.edgeuses().iter().count(), before);
         }
+    }
+
+    #[test]
+    fn spatial_index_wide_vertex_clearance_passes_clear_and_catches_reaching() {
+        use crate::curve::line::Line;
+        use crate::topology::brep::p5::create_wire_edge_from_curve;
+
+        let mut k = Kernel::default();
+        let mut body =
+            crate::primitive::api_primitives::create_box(&mut k, Vec3::ZERO, 4.0, 4.0, 4.0)
+                .unwrap();
+        // Add 10 separated wire edges spaced along y so the SpatialIndex builds a multi-node tree.
+        let interval = Extent1d::from_min_max(0.0, 1.0);
+        for i in 0..10u32 {
+            let y = 10.0 + f64::from(i) * 3.0;
+            let line = Line::create_line_segment(
+                3,
+                Vec3::new(0.0, y, 0.0),
+                Vec3::new(2.0, y, 0.0),
+                Some(&interval),
+            )
+            .unwrap();
+            create_wire_edge_from_curve(&mut k, &mut body, Curve::from(line), interval).unwrap();
+        }
+        // Body tolerance 5e-4 -> wide_vertex_limit is 0.5, GROWTH_PAST_RATIO * limit is 1.0.
+        body.set_tolerance(5e-4);
+        let all_vertices = body.vertex_list().to_vec();
+        for &v in &all_vertices {
+            body.vertex_mut(v).unwrap().tolerance = 0.75;
+        }
+        let mut array = AssertArray::new();
+        let mut reports = Reports {
+            array: Some(&mut array),
+            failed: false,
+        };
+        check_vertex_exclusion(&k, &mut body, &mut reports).unwrap();
+        assert!(
+            !reports.failed,
+            "clear wide vertices should pass: {:?}",
+            array.reports()
+        );
+
+        // Add a separate wire edge 0.5 units from box vertex (0, 0, 0) so only that wide vertex
+        // reaches it.
+        let near = Line::create_line_segment(
+            3,
+            Vec3::new(-0.5, 0.0, 0.0),
+            Vec3::new(-0.5, 0.0, 1.0),
+            Some(&interval),
+        )
+        .unwrap();
+        create_wire_edge_from_curve(&mut k, &mut body, Curve::from(near), interval).unwrap();
+        let mut array = AssertArray::new();
+        let mut reports = Reports {
+            array: Some(&mut array),
+            failed: false,
+        };
+        check_vertex_exclusion(&k, &mut body, &mut reports).unwrap();
+        assert!(reports.failed);
+        assert!(
+            array.reports().iter().any(|report| report.test_index == 82),
+            "expected Test #82 clearance failure: {:?}",
+            array.reports()
+        );
     }
 }

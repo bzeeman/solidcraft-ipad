@@ -342,8 +342,9 @@ fn cell_selection_leaves_buttons_and_editors_in_charge_of_their_clicks() {
 
 #[test]
 fn fitting_flex_tables_have_no_horizontal_scrollbar_at_card_widths_and_pixel_scales() {
-    for ppp in [1.0, 1.25, 2.0] {
-        for width in [260.0, 319.0, 320.0, 499.0, 500.3, 748.0, 749.0, 762.0] {
+    // At 0.9375 the 8-point gaps are 7.5 px, so the columns' share can end on a half pixel (#22382).
+    for ppp in [0.9375, 1.0, 1.25, 1.75, 2.0] {
+        for width in [260.0, 319.0, 320.0, 499.0, 500.3, 720.0, 748.0, 749.0, 762.0] {
             let ctx = crate::test_support::context();
             ctx.set_pixels_per_point(ppp);
             for _ in 0..3 {
@@ -376,7 +377,7 @@ fn fitting_flex_tables_have_no_horizontal_scrollbar_at_card_widths_and_pixel_sca
             }
             let viewport = registry::rect_of("dialog:table:fit:viewport").unwrap();
             let content = registry::count_of("dialog:table:fit:content_width").unwrap() as f32;
-            assert!(content <= viewport.width().ceil(), "{width} at {ppp}: content {content}, viewport {viewport:?}");
+            assert!(content <= viewport.width() + 0.01, "{width} at {ppp}: content {content}, viewport {viewport:?}");
             let row = registry::rect_of("dialog:table:fit:row").unwrap();
             let first = registry::rect_of("dialog:table:fit:row:cell:Name").unwrap();
             let last = registry::rect_of("dialog:table:fit:row:cell:Value").unwrap();
@@ -1213,4 +1214,56 @@ fn hostile_column_counts_weights_and_minimums_are_bounded() {
         });
     });
     assert!(registry::rect_of("dialog:table:bounded:row").unwrap().is_finite());
+}
+
+#[test]
+fn fitted_tables_keep_overlarge_column_minimums_inside_the_hovered_card() {
+    for width in [180.0, 280.0, 420.0, 646.0] {
+        for ppp in [0.9375, 1.0, 1.25, 1.3, 2.0] {
+            let ctx = harness::context();
+            ctx.set_pixels_per_point(ppp);
+            let draw = |ui: &mut egui::Ui| {
+                ui.set_width(width);
+                let columns =
+                    ["Axis", "Live input", "Invert", "Speed", "Source"].map(|label| Column::new(label, 1.0).flex().min_content_width(200.0));
+                table_fitted(ui, "fitted", &columns, "", |ui, table| {
+                    table.headers(ui, |_, _| false);
+                    for index in 0..6 {
+                        table.row(ui, &index.to_string(), false, |row| {
+                            for _ in 0..5 {
+                                row.cell(|ui| crate::text(ui, "Value", crate::Text::Cell));
+                            }
+                        });
+                    }
+                });
+                assert!(ui.min_rect().width() <= width + 0.5);
+            };
+            harness::raw_frame(&ctx, egui::RawInput::default(), draw);
+            let viewport = registry::rect_of("dialog:table:fitted:viewport").unwrap();
+            for frame in 0..6 {
+                let output = harness::raw_frame(
+                    &ctx,
+                    egui::RawInput {
+                        time: Some(0.5 + f64::from(frame) * 0.1),
+                        events: vec![egui::Event::PointerMoved(viewport.center())],
+                        ..Default::default()
+                    },
+                    draw,
+                );
+                let bottom = registry::rect_of("dialog:table:fitted:5").unwrap().bottom();
+                assert!(
+                    !output.shapes.iter().any(|shape| matches!(&shape.shape, egui::Shape::Rect(rect)
+                    if rect.fill.a() > 0 && rect.rect.width() > 100.0 && rect.rect.height() <= 10.0
+                        && rect.rect.top() >= bottom && rect.rect.bottom() <= bottom + 20.0)),
+                    "{width}/{ppp}: no horizontal bar while hovered"
+                );
+            }
+            let viewport = registry::rect_of("dialog:table:fitted:viewport").unwrap();
+            let content = registry::count_of("dialog:table:fitted:content_width").unwrap();
+            assert!(content <= f64::from(viewport.width()) + 0.5, "{width}/{ppp}: content {content} exceeds {viewport:?}");
+            for index in 0..6 {
+                assert!(viewport.expand(0.5).contains_rect(registry::rect_of(&format!("dialog:table:fitted:{index}")).unwrap()));
+            }
+        }
+    }
 }

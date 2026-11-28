@@ -150,10 +150,10 @@ pub(crate) fn parameter_changes(
 
 thread_local! {
     static EXISTING: RefCell<Option<Existing>> = const { RefCell::new(None) };
-    /// Where the open window sits, for which parameter, and the frame it was last drawn in. It
-    /// stays where it opened while it is open, so its arrows stay under the pointer while the
-    /// stepped value moves the dimension's text.
-    static ANCHOR: RefCell<Option<(String, u64, Pos2)>> = const { RefCell::new(None) };
+    /// Where the open window sits, for which opening of it ([`super::Edit`]'s `opened`), and the
+    /// frame it was last drawn in. It stays where it opened while it is open, so its arrows stay
+    /// under the pointer while the stepped value moves the dimension's text.
+    static ANCHOR: RefCell<Option<(u64, u64, Pos2)>> = const { RefCell::new(None) };
 }
 
 /// Whether the open window is under `p`: the wheel there steps its value, so the camera under it
@@ -239,19 +239,19 @@ pub(super) fn paint(app: &SolveApp, painter: &egui::Painter, proj: &Proj) {
     let state = app.session.world_state().ok();
     let changes = after.and_then(|after| crate::preview::sketch_changes(state.as_ref().and_then(|state| state.sketch(sketch)), &after));
     let mut budget = solidcraft_engine::render::SamplingBudget::new(32_768, 65_536);
-    let curves = changes.map_or(0, |changes| crate::preview::paint_sketch(&changes, painter, proj, &mut budget));
+    let curves = changes.map_or(0, |changes| crate::preview::paint_sketch(&changes, painter, proj, &mut budget, None));
     crate::scenario::publish_count("dimwin:preview_curves", curves as f64);
 }
 
 /// Where the window goes: where it already is while it stays open, else under the dimension's
 /// text `at` (over it where the view has no room below); always inside the view's free area.
 /// `size` is the window's as drawn last frame.
-fn place(app: &SolveApp, ctx: &egui::Context, param: &str, at: Pos2, size: egui::Vec2) -> Pos2 {
+fn place(app: &SolveApp, ctx: &egui::Context, opened: u64, at: Pos2, size: egui::Vec2) -> Pos2 {
     let frame = ctx.cumulative_frame_nr();
     let view = app.viewport.layout.as_ref().map(|layout| layout.drawable).filter(|r| r.is_finite() && r.is_positive());
     ANCHOR.with(|anchor| {
         let mut anchor = anchor.borrow_mut();
-        let open = anchor.as_ref().filter(|(open, drawn, _)| open == param && drawn.saturating_add(1) >= frame).map(|x| x.2);
+        let open = anchor.as_ref().filter(|(open, drawn, _)| *open == opened && drawn.saturating_add(1) >= frame).map(|x| x.2);
         let mut pos = open.unwrap_or_else(|| {
             let gap = Tokens::get().space_12;
             let below = Pos2::new(at.x - size.x * 0.5, at.y + gap);
@@ -261,7 +261,7 @@ fn place(app: &SolveApp, ctx: &egui::Context, param: &str, at: Pos2, size: egui:
             pos.x = pos.x.clamp(rect.left(), (rect.right() - size.x).max(rect.left()));
             pos.y = pos.y.clamp(rect.top(), (rect.bottom() - size.y).max(rect.top()));
         }
-        *anchor = Some((param.to_string(), frame, pos));
+        *anchor = Some((opened, frame, pos));
         pos
     })
 }
@@ -312,7 +312,9 @@ pub(super) fn show(app: &mut SolveApp, ctx: &egui::Context, e: &mut Edit, at: Po
     let arrows = 2.0 * (t.form_close_size - t.space_4) + t.space_2;
     let width = window_width(ctx, &e.expr, !rows.is_empty(), arrows);
     let guess = egui::vec2(width + t.space_6 * 2.0, t.control_height * 2.0 + t.space_6 * 3.0);
-    let anchor = place(app, ctx, &e.param, at, last.map_or(guess, |r| r.size()));
+    let anchor = place(app, ctx, e.opened, at, last.map_or(guess, |r| r.size()));
+    super::own_moved(ctx, e.opened);
+    super::note_shown(ctx);
     // A click on the window (an arrow) takes the keyboard from its field, as any click away does;
     // the field takes it back instead of closing.
     let on_window = ctx.input(|i| {
@@ -321,6 +323,7 @@ pub(super) fn show(app: &mut SolveApp, ctx: &egui::Context, e: &mut Edit, at: Po
     let mut answer: Option<bool> = None;
     let mut escaped = false;
     let mut by = 0.0;
+    let mut grabbed = false;
     Container::new(ctx, Surface::Canvas).area(area).fixed_pos(anchor).order(egui::Order::Foreground).show(ctx, |ui| {
         Container::popup_frame(ui.style()).fill(t.dialog_body).inner_margin(t.space_6).show(ui, |ui| {
             crate::ui_kit::scope(ui, |ui| {
@@ -335,6 +338,16 @@ pub(super) fn show(app: &mut SolveApp, ctx: &egui::Context, e: &mut Edit, at: Po
                 let side = t.control_height;
                 let cancel = Rect::from_min_size(egui::pos2(title.right() - side, title.top()), egui::vec2(side, side));
                 let ok = cancel.translate(egui::vec2(-(side + t.space_2), 0.0));
+                // Short of the check and the cross, which keep their clicks.
+                let (dragged, held) = super::grip(ui, title.with_max_x(ok.left() - t.space_2));
+                if dragged != egui::Vec2::ZERO {
+                    ANCHOR.with(|a| {
+                        if let Some(open) = a.borrow_mut().as_mut() {
+                            open.2 += dragged;
+                        }
+                    });
+                }
+                grabbed = held;
                 if button(ui, ok, "dimwin:ok", solidcraft_ui_text::tr("ui.heading_ok"), "finish") {
                     answer = Some(true);
                 }
@@ -353,8 +366,12 @@ pub(super) fn show(app: &mut SolveApp, ctx: &egui::Context, e: &mut Edit, at: Po
                         if r.has_focus() {
                             e.selection = egui::TextEdit::load_state(ctx, id).and_then(|s| s.cursor.char_range());
                         }
-                        if crate::expression_complete::complete(ui, &r, &mut e.expr) {
+                        let completed = crate::expression_complete::complete(ui, &r, &mut e.expr);
+                        if completed {
                             e.selection = egui::TextEdit::load_state(ctx, id).and_then(|s| s.cursor.char_range());
+                        }
+                        if r.changed() || completed {
+                            e.create_variable = None;
                         }
                         let can_step = step(&e.expr, 1.0).is_some();
                         let tip = |id: &str| {
@@ -388,9 +405,10 @@ pub(super) fn show(app: &mut SolveApp, ctx: &egui::Context, e: &mut Edit, at: Po
                 } else {
                     ui.data_mut(|d| d.remove::<f32>(wheel));
                 }
-                if let Some(error) = &error {
+                if let Some(error) = e.create_variable.as_ref().map(|offer| &offer.error).or(error.as_ref()) {
                     crate::ui_kit::text(ui, error, crate::ui_kit::Text::Report("dimension_error", true));
                 }
+                let create = super::create_variable_button(ui, e.create_variable.as_ref());
                 // The user parameters the value names, each in its own field (#16319).
                 let row_state = parameter_fields(app, ui, id, width, e, &rows, row_error.is_some());
                 if !rows.is_empty() {
@@ -424,7 +442,7 @@ pub(super) fn show(app: &mut SolveApp, ctx: &egui::Context, e: &mut Edit, at: Po
                     Some(true)
                 } else if in_row && !left_click_outside {
                     None
-                } else if e.fresh > 0 || on_window || by != 0.0 || (lost_or_outside_press && press_on_reference) {
+                } else if e.fresh > 0 || on_window || grabbed || by != 0.0 || (lost_or_outside_press && press_on_reference) {
                     if !r.has_focus() {
                         r.request_focus();
                     }
@@ -440,6 +458,12 @@ pub(super) fn show(app: &mut SolveApp, ctx: &egui::Context, e: &mut Edit, at: Po
                     None
                 };
                 answer = answer.or(field);
+                if create && let Some(offer) = e.create_variable.take() {
+                    e.expr = offer.definition;
+                    e.owned = true;
+                    e.typed = true;
+                    answer = Some(true);
+                }
                 if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     answer = Some(false);
                     escaped = true;
@@ -455,6 +479,7 @@ pub(super) fn show(app: &mut SolveApp, ctx: &egui::Context, e: &mut Edit, at: Po
         && let Some(stepped) = step(&e.expr, by)
     {
         e.expr = stepped;
+        e.create_variable = None;
         // The whole new value is selected, so typing replaces it.
         select_all(ctx, id, e);
         ctx.request_repaint();

@@ -150,9 +150,6 @@ const OP_LINE_FIT: &str = "curve::curve::p3::BestLineFitEnfo::evaluate";
 /// component is below about `1e154`, and then needs at most 152 more divisions.
 pub const MAX_PC_SCALE_STEPS: u64 = 400;
 
-// `SM_ERR_NOT_CONVERGING`.
-use crate::error::SM_ERR_NOT_CONVERGING;
-
 /// `EvaluatePoint` whose status upstream ignores, or `None` when the point cannot be
 /// evaluated (the fork's curve-list helpers then skip the gap, tangency-labs/smlib
 /// 8311f8e); [`SolidError::Unported`] is propagated.
@@ -336,12 +333,6 @@ fn unitize_written(normal: &mut Vec3, status: impl FnOnce(SolidError) -> SolidEr
 /// area is the call's status), written into `normal` as upstream writes
 /// `crCrvsNormal`.
 fn crvs_normal_into(k: &Kernel, curves: &[Curve], normal: &mut Vec3) -> Result<()> {
-    // (test-only seam of the WR-587 retirement's replay, feature `wr57-replay`)
-    #[cfg(feature = "wr57-replay")]
-    return crate::surface::surface::replay::wrap_loop_normal(k, curves, normal, |n| {
-        area_normal_into(k, curves, n)
-    });
-    #[cfg(not(feature = "wr57-replay"))]
     area_normal_into(k, curves, normal)
 }
 
@@ -792,18 +783,6 @@ pub struct ArcLengthParameter {
     /// False when the Newton iteration stopped moving (upstream returns
     /// `SM_ERR_NOT_CONVERGING` with the last parameter).
     pub converged: bool,
-}
-
-impl ArcLengthParameter {
-    /// The upstream status: `0` (`SM_SUCCESS`) or `SM_ERR_NOT_CONVERGING`.
-    #[must_use]
-    pub const fn status(&self) -> i32 {
-        if self.converged {
-            0
-        } else {
-            SM_ERR_NOT_CONVERGING
-        }
-    }
 }
 
 impl Curve {
@@ -2611,6 +2590,7 @@ mod tests {
     use crate::curve::hermite_curve::HermiteCurve;
     use crate::curve::line::{BoundedLineOptions, Line};
     use crate::error::{SM_ERR, SM_ERR_NULL_POINTER};
+    use crate::math::det;
 
     fn hermite(p1: [f64; 3], d1: [f64; 3], p2: [f64; 3], d2: [f64; 3]) -> Curve {
         Curve::from(HermiteCurve::new(
@@ -2885,11 +2865,11 @@ mod tests {
     #[test]
     fn tilted_chains_of_cancelling_area_answer_their_plane_at_every_scale() {
         let k = Kernel::default();
-        let u = Vec3::new(0.3_f64.cos(), 0.3_f64.sin(), 0.0);
+        let u = Vec3::new(det::cos(0.3_f64), det::sin(0.3_f64), 0.0);
         let v = Vec3::new(
-            -0.3_f64.sin() * 0.7_f64.cos(),
-            0.3_f64.cos() * 0.7_f64.cos(),
-            0.7_f64.sin(),
+            -det::sin(0.3_f64) * det::cos(0.7_f64),
+            det::cos(0.3_f64) * det::cos(0.7_f64),
+            det::sin(0.7_f64),
         );
         let plane = u.cross(v).unitize().unwrap();
         for scale in [1.0, 10.0, 100.0, 1e3, 1e4] {
@@ -3089,7 +3069,7 @@ mod tests {
                 "{size:e}"
             );
         }
-        let (l, d) = (2f64.powi(516), 2f64.powi(-20));
+        let (l, d) = (det::powi(2f64, 516), det::powi(2f64, -20));
         let parallelogram = polyline(&[
             [0.0, 0.0, 0.0],
             [l, 1.0, 0.0],
@@ -3354,7 +3334,7 @@ mod tests {
         let ivl = c.natural_interval();
         let angle = 30f64.to_radians();
         for rho in [1e-2, 1e-4, 1e-6] {
-            let p = Vec3::new(rho * angle.cos(), rho * angle.sin(), 0.0);
+            let p = Vec3::new(rho * det::cos(angle), rho * det::sin(angle), 0.0);
             {
                 let k = Kernel::default();
                 let (found, sol): (bool, Solution<()>) = c
@@ -3369,7 +3349,7 @@ mod tests {
                     .unwrap();
                 assert!(found, "rho {rho}");
                 let q = c.evaluate_point(&k, sol.start.parameters[0]).unwrap();
-                let at = q.y.atan2(q.x);
+                let at = det::atan2(q.y, q.x);
                 // the solve stops where the gap is square to the tangent within EFF_ZERO,
                 // an angle of (rho / R) (at - angle) there: the point is as ill-conditioned
                 // as R / rho, its distance not

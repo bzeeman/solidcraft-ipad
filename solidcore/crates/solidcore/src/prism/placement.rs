@@ -19,6 +19,7 @@
 
 #![allow(clippy::neg_cmp_op_on_partial_ord)] // NaN-refusing tests, kept as written
 
+use crate::math::det;
 use std::f64::consts::TAU;
 
 use super::profile::{cross2, Loop2, Seg2, MAX_SEGMENTS};
@@ -90,12 +91,24 @@ fn turned(ang: f64, sweep: f64) -> f64 {
 }
 
 fn angle_of(v: Vec2) -> f64 {
-    v.y.atan2(v.x)
+    det::atan2(v.y, v.x)
 }
 
 fn unit(v: Vec2) -> Option<Vec2> {
     let l = v.length();
     (l > 0.0 && l.is_finite()).then(|| v * (1.0 / l))
+}
+
+impl Seg2 {
+    /// How far `p` is from the segment, exactly, for a line or a circular arc: the foot on a line
+    /// clamped to its ends; on an arc the radial distance where `p` is within its angles (any
+    /// point, at its centre), else the distance to the nearer end. `None` for a free-form
+    /// segment, which has no closed form here, and for a point or segment that is not finite.
+    #[must_use]
+    pub fn distance_to(&self, p: Point2) -> Option<f64> {
+        let d = self.is_line_or_arc().then(|| point_distance(p, self))?;
+        d.is_finite().then_some(d)
+    }
 }
 
 /// How far `p` is from the line or arc `s` (exact: the foot on a line clamped to its ends; on an

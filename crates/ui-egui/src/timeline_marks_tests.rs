@@ -1,4 +1,4 @@
-//! A failed feature is marked in the bottom timeline and the Feature History by a shape, not only
+//! A failed feature is marked in the bottom timeline, the Feature History and the History grid by a shape, not only
 //! its colour (#972): the error mark where a warning's mark goes (now an icon image, so these
 //! tests look for the 10-point image at the mark's place).
 
@@ -45,12 +45,17 @@ fn error_discs(app: &mut SolveApp, draw: fn(&mut SolveApp, &mut egui::Ui)) -> Ve
 
 /// The features that have a disc where their mark goes (`at`: the mark's centre from the item's).
 fn marked(app: &mut SolveApp, draw: fn(&mut SolveApp, &mut egui::Ui), at: impl Fn(Pos2, Pos2) -> bool) -> Vec<(String, bool)> {
+    marked_by(app, draw, "timeline:", at)
+}
+
+/// [`marked`], with the items found by their handles' `prefix`.
+fn marked_by(app: &mut SolveApp, draw: fn(&mut SolveApp, &mut egui::Ui), prefix: &str, at: impl Fn(Pos2, Pos2) -> bool) -> Vec<(String, bool)> {
     let discs = error_discs(app, draw);
-    let handles = crate::scenario::handles("timeline:");
+    let handles = crate::scenario::handles(prefix);
     features(app)
         .into_iter()
         .map(|(name, _)| {
-            let item = handles.iter().find(|(h, _)| *h == format!("timeline:{name}")).map(|(_, p)| *p);
+            let item = handles.iter().find(|(h, _)| *h == format!("{prefix}{name}")).map(|(_, p)| *p);
             let item = item.unwrap_or_else(|| panic!("{name} is not drawn"));
             let has = discs.iter().any(|d| at(item, *d));
             (name, has)
@@ -75,6 +80,18 @@ fn a_failed_feature_is_marked_in_the_feature_history() {
     let want = features(&app);
     // The mark sits at the row's right end, on its centre line.
     let got = marked(&mut app, crate::timeline_left::panel_contents, |item, d| (d.y - item.y).abs() < 1.5 && d.x > item.x);
+    assert_eq!(got, want, "an error mark on each failed feature and on no other");
+}
+
+#[test]
+fn a_failed_feature_is_marked_in_the_history_grid() {
+    // #23390: the grid showed the error only in a chip's tooltip.
+    let mut app = failing_sample();
+    let want = features(&app);
+    // The mark sits in the chip's top-right corner: 10 points square, inside the 38 × 32 chip.
+    let got = marked_by(&mut app, crate::timeline_2d::panel_contents, "timeline_2d:", |chip, d| {
+        (d.x - (chip.x + 14.0)).abs() < 1.5 && (d.y - (chip.y - 11.0)).abs() < 1.5
+    });
     assert_eq!(got, want, "an error mark on each failed feature and on no other");
 }
 
@@ -212,6 +229,36 @@ fn a_sketchs_icon_takes_its_states_colour_in_both_histories_and_the_browser() {
         assert!(icons.iter().all(|colours| colours.len() > 1), "the sketch artwork, not one ink: {icons:?}");
         assert!(icons.windows(2).all(|w| w[0] == w[1]), "every sketch's icon alike");
     }
+}
+
+/// With the History docked in the browser, a sketch's row in its History folder takes the state's
+/// colour and names the state in its tooltip, as the sketch's Sketches folder row does (#22185).
+#[test]
+fn a_sketchs_row_in_the_browsers_history_folder_takes_its_states_colour() {
+    let mut h = sketch_states_design();
+    h.app.run("view.history_layout", json!({"dock": "browser"})).unwrap();
+    assert!(h.app.preferences.history_in_browser);
+    h.app.tree.expanded.insert("c0/features".into());
+    let t = solidcraft_theme::Tokens::get();
+    let want = [("Guide", t.sketch), ("Fixed", t.sketch_fixed), ("Reach", t.error)];
+    let row = |h: &crate::scenario::Harness, name: &str| format!("row:browser-feature:c0:{}", h.app.session.doc.find_feature(name).unwrap().id);
+    let (shapes, textures) = fresh_frame(&mut h);
+    for (name, colour) in want {
+        let at = crate::scenario::handle_at(&row(&h, name)).unwrap_or_else(|| panic!("{name}: no History folder row"));
+        assert_eq!(icon_colours(&shapes, &textures, at, 15.5..=16.5), vec![colour.to_array()], "{name}: History folder");
+    }
+    let fixed = row(&h, "Fixed");
+    h.step(&json!({"move": {"handle": fixed}})).unwrap();
+    h.frames(60);
+    let texts = painted_texts(&mut h);
+    assert!(texts.iter().any(|t| t.contains("Fully constrained")), "no `Fully constrained` in {texts:?}");
+    // Preference off: the rows keep the sketch artwork, all alike.
+    h.app.preferences.sketch_state_icons = false;
+    let (shapes, textures) = fresh_frame(&mut h);
+    let icons: Vec<_> =
+        want.iter().map(|(name, _)| icon_colours(&shapes, &textures, crate::scenario::handle_at(&row(&h, name)).unwrap(), 15.5..=16.5)).collect();
+    assert!(icons.iter().all(|colours| colours.len() > 1), "the sketch artwork, not one ink: {icons:?}");
+    assert!(icons.windows(2).all(|w| w[0] == w[1]), "every sketch's icon alike");
 }
 
 /// Every text one frame paints.

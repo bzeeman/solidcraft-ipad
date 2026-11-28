@@ -36,7 +36,12 @@ const MARGIN: f64 = 0.01;
 pub fn flat_walls_as_planes(k: &Kernel, b: &mut Brep, faces: &[FaceId]) -> Result<Vec<FaceId>> {
     let mut made = Vec::new();
     for &f in faces {
-        let Some(plane) = flat_wall_plane(k, b, f) else {
+        let Some(plane) = b
+            .face(f)
+            .ok()
+            .and_then(|face| face.surface.as_ref())
+            .and_then(|s| flat_spline_plane(k, s))
+        else {
             continue;
         };
         let replaced = b.with_rollback(
@@ -69,11 +74,10 @@ fn axes(frame: &PlaneFrame, normal: Vec3) -> Option<(Vec3, Vec3)> {
     }
 }
 
-/// The plane of face `f` when its surface is a B-spline lying in one: axes so that its natural
+/// The plane of a B-spline surface lying in one: axes so that its natural
 /// normal (x × y) points the way the B-spline's does at the middle of its domain, over the box
 /// of its control points in the plane with a margin. `None` otherwise.
-fn flat_wall_plane(k: &Kernel, b: &Brep, f: FaceId) -> Option<Surface> {
-    let surface = b.face(f).ok()?.surface.as_ref()?;
+pub(crate) fn flat_spline_plane(k: &Kernel, surface: &Surface) -> Option<Surface> {
     let SurfaceKind::BSpline(spline) = surface.kind() else {
         return None;
     };
@@ -120,6 +124,7 @@ mod tests {
     use crate::curve::curve::Curve;
     use crate::kernel::Kernel;
     use crate::mass::integrator::properties::brep_volume_default;
+    use crate::math::det;
     use crate::math::Point3;
     use crate::math::Vec3;
     use crate::primitive::api_curves::{create_arc, create_line_segment};
@@ -288,7 +293,7 @@ mod tests {
         let (axis, angle): ([f64; 3], f64) = ([1.0, 2.0, 3.0], 37f64.to_radians());
         let n = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
         let a = [axis[0] / n, axis[1] / n, axis[2] / n];
-        let (s, c) = angle.sin_cos();
+        let (s, c) = det::sin_cos(angle);
         // Rodrigues: p cos + (a × p) sin + a (a · p)(1 − cos)
         let turn = move |p: [f64; 3]| {
             let d = a[0] * p[0] + a[1] * p[1] + a[2] * p[2];

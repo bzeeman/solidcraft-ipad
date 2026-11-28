@@ -1,6 +1,10 @@
 use super::*;
 use crate::{scenario::Harness, ui_kit::LayoutMode};
 
+fn any_popup_open(ctx: &egui::Context) -> bool {
+    egui::Popup::is_any_open(ctx) || crate::ui_kit::Menu::any_open(ctx)
+}
+
 #[test]
 fn details_descriptions_are_pure_and_live_edits_preserve_custom_companions() {
     use crate::ui_kit::DetailValue as V;
@@ -227,11 +231,11 @@ fn details_owned_dropdown_suspends_without_leaking_above_preferences_or_mode_cha
     h.frames(3);
     h.step(&json!({"click":{"handle":"details:field:record"}})).unwrap();
     h.frames(3);
-    assert!(egui::Popup::is_any_open(&h.ctx));
+    assert!(any_popup_open(&h.ctx));
     let before = h.app.session.continuity.clone();
     h.call("ui.prefs", json!({"open":"Interface"}));
     h.frames(3);
-    assert!(!egui::Popup::is_any_open(&h.ctx));
+    assert!(!any_popup_open(&h.ctx));
     assert!(crate::scenario::rect_of("viewport_status:card").is_none());
     assert!(!h.app.viewport_status.owns_focus(&h.ctx));
     assert_eq!(h.app.session.continuity, before);
@@ -241,7 +245,7 @@ fn details_owned_dropdown_suspends_without_leaking_above_preferences_or_mode_cha
     h.call("ui.prefs", json!({"viewport_status_details":false}));
     h.frames(3);
     assert!(h.app.viewport_status.open_key.is_none());
-    assert!(!egui::Popup::is_any_open(&h.ctx));
+    assert!(!any_popup_open(&h.ctx));
     assert!(!crate::ui_kit::details_field_owns_focus(&h.ctx));
     assert_eq!(h.app.session.continuity, before);
 }
@@ -367,7 +371,7 @@ fn details_document_identity_releases_equal_slot_owners_and_native_buffers() {
     h.frames(3);
     assert_eq!(h.app.session.uid, uid);
     assert!(h.app.viewport_status.open_key.is_none());
-    assert!(!egui::Popup::is_any_open(&h.ctx));
+    assert!(!any_popup_open(&h.ctx));
     assert!(matches!(h.app.session.analysis,Some(solidcraft_engine::SurfaceAnalysis::Draft{angle,..}) if angle==3.0));
 }
 
@@ -409,9 +413,9 @@ fn details_tool_and_native_record_menu_each_keep_the_first_escape() {
     assert!(!h.app.session.continuity.is_empty());
     h.step(&json!({"click":{"handle":"details:field:record"}})).unwrap();
     h.frames(3);
-    assert!(egui::Popup::is_any_open(&h.ctx));
+    assert!(any_popup_open(&h.ctx));
     h.step(&json!({"key":"Escape"})).unwrap();
-    assert!(!egui::Popup::is_any_open(&h.ctx));
+    assert!(!any_popup_open(&h.ctx));
     assert!(h.app.viewport_status.open_key.is_some());
     assert!(!h.app.session.continuity.is_empty());
 }
@@ -423,6 +427,8 @@ fn details_summary_owner_anchors_and_count_changes_release_stale_cards() {
     h.frames(3);
     let effect = h.app.session.status_items().into_iter().find(|effect| effect.command == "inspect.section").unwrap();
     let owner = crate::viewport_status::identity(&effect);
+    h.step(&json!({"click":{"handle":format!("viewport_status:{owner}:item")}})).unwrap();
+    h.frames(2);
     h.step(&json!({"click":{"handle":format!("viewport_status:{owner}:key")}})).unwrap();
     h.frames(3);
     let badge = crate::scenario::rect_of("viewport_status:summary").unwrap();
@@ -433,7 +439,7 @@ fn details_summary_owner_anchors_and_count_changes_release_stale_cards() {
         (outline.left() - card.left()).abs() < 1.0 && card.top() > outline.bottom(),
         "visible owner {outline:?}, target {badge:?}, card {card:?}"
     );
-    assert!(!egui::Popup::is_any_open(&h.ctx));
+    assert!(!any_popup_open(&h.ctx));
     h.app.run("inspect.continuity", json!({"clear":true})).unwrap();
     h.frames(3);
     assert!(h.app.viewport_status.open_key.is_none());
@@ -485,7 +491,15 @@ fn viewport_status_kinds_keep_shape_outline_and_typography_across_themes() {
             let t = Tokens::get();
             for (kind, outline) in [(StatusKind::Mode, t.accent), (StatusKind::Result, t.border), (StatusKind::Attention, t.warning)] {
                 let ctx = crate::fonts::test_context();
-                let item = StatusItem { id: "test".into(), kind, name: "Draft".into(), setting: "Z · 1°".into(), has_key: true, editable: false };
+                let item = StatusItem {
+                    id: "test".into(),
+                    kind,
+                    name: "Draft".into(),
+                    setting: "Z · 1°".into(),
+                    has_key: true,
+                    editable: false,
+                    clear_key: None,
+                };
                 let output = crate::test_support::frame(&ctx, egui::RawInput::default(), |ui| {
                     viewport_status_item(ui, &item, &mut StatusPresentation::default());
                 });
@@ -531,7 +545,8 @@ fn viewport_status_every_part_is_centred_within_its_pill_in_every_theme() {
                     ("Draft", "Z · 1°", true, true),
                 ] {
                     let ctx = crate::fonts::test_context();
-                    let item = StatusItem { id: "centred".into(), kind, name: name.into(), setting: setting.into(), has_key, editable };
+                    let item =
+                        StatusItem { id: "centred".into(), kind, name: name.into(), setting: setting.into(), has_key, editable, clear_key: None };
                     let output = crate::test_support::frame(&ctx, egui::RawInput::default(), |ui| {
                         viewport_status_item(ui, &item, &mut StatusPresentation::default());
                     });
@@ -618,6 +633,7 @@ fn viewport_status_close_hover_has_a_theme_fill_and_native_space_action_in_every
                 setting: "12 stripes".into(),
                 has_key: false,
                 editable: false,
+                clear_key: None,
             };
             let mut state = StatusPresentation::default();
             let (rest, action) = paint(&ctx, &item, &mut state, vec![]);
@@ -1175,6 +1191,34 @@ fn bottom_readouts_clear_floating_history_on_the_first_frame() {
         let readout = crate::scenario::rect_of(name).unwrap();
         assert!(!readout.intersects(history));
         assert!((readout.bottom() - (history.top() - solidcraft_theme::Tokens::get().space_8 - 12.0)).abs() < 0.01);
+    }
+}
+
+/// With the status bar on, the bottom readouts end above it: the bar is window chrome spanning
+/// the window's bottom edge, so a readout pinned to the view's bottom sits behind it (#22911).
+#[test]
+fn bottom_readouts_clear_the_status_bar() {
+    let mut h = Harness::new();
+    // The corner legend remains available through the analysis HUD compatibility setting.
+    h.app.preferences.viewport_analysis_status = false;
+    h.app.home.open = false;
+    h.app.ui.layout = LayoutMode::Floating;
+    h.app.preferences.timeline_left = false;
+    h.app.ui.show_timeline = false;
+    h.app.preferences.show_frame_rate = true;
+    h.app.run("inspect.draft", json!({})).unwrap();
+    h.call("ui.prefs", json!({"status_bar": true}));
+    h.settle();
+    let bar = crate::scenario::rect_of("status:bar").expect("the status bar is drawn");
+    let viewport = h.app.viewport.rect.unwrap();
+    for name in ["analysis:legend", "viewport:frame_rate"] {
+        let readout = crate::scenario::rect_of(name).unwrap();
+        assert!(viewport.contains_rect(readout), "{name}: {readout:?} outside {viewport:?}");
+        assert!(!readout.intersects(bar), "{name}: {readout:?} under the bar {bar:?}");
+        assert!(
+            (readout.bottom() - (bar.top() - solidcraft_theme::Tokens::get().space_8 - 12.0)).abs() < 0.01,
+            "{name}: {readout:?} just above the bar {bar:?}"
+        );
     }
 }
 
@@ -2226,7 +2270,7 @@ fn analysis_status_focused_dialog_and_real_text_popup_preserve_owner_priority_in
             assert!(h.ctx.memory(|memory| memory.focused().is_some()), "the real radius editor has focus");
             if popup {
                 h.call("ui.click", json!({"x":at.x,"y":at.y,"button":"right"}));
-                assert!(egui::Popup::is_any_open(&h.ctx), "a real editor context menu is open");
+                assert!(any_popup_open(&h.ctx), "a real editor context menu is open");
                 let mut reached_guard = false;
                 let mut tap = crate::test_support::key(egui::Key::Escape);
                 tap.push(egui::Event::Key {
@@ -2247,7 +2291,7 @@ fn analysis_status_focused_dialog_and_real_text_popup_preserve_owner_priority_in
                     |ui| {
                         let first = ui.ctx().current_pass_index() == 0;
                         if first {
-                            assert!(egui::Popup::is_any_open(ui.ctx()), "the surviving popup predicate reaches the global guard");
+                            assert!(any_popup_open(ui.ctx()), "the surviving popup predicate reaches the global guard");
                             reached_guard = true;
                         }
                         h.app.logic(ui.ctx());
@@ -2260,7 +2304,7 @@ fn analysis_status_focused_dialog_and_real_text_popup_preserve_owner_priority_in
                     },
                 );
                 assert!(reached_guard);
-                assert!(!egui::Popup::is_any_open(&h.ctx));
+                assert!(!any_popup_open(&h.ctx));
                 assert!(h.app.dialog.is_some(), "the first Escape closes only the editor's menu");
                 assert!(h.app.session.analysis.is_some());
             }
@@ -2539,13 +2583,13 @@ fn section_only_status_real_editor_popup_then_dialog_own_escape_before_the_cut()
     h.call("ui.click", json!({"x":at.x,"y":at.y}));
     assert!(h.ctx.memory(|memory| memory.focused().is_some()));
     h.call("ui.click", json!({"x":at.x,"y":at.y,"button":"right"}));
-    assert!(egui::Popup::is_any_open(&h.ctx));
+    assert!(any_popup_open(&h.ctx));
     let cut = h.app.session.section.clone();
     analysis_escape_relayout_frame(&mut h, |app| {
         assert!(app.dialog.is_some(), "the real popup has first refusal before Dialog cancellation");
         assert_eq!(app.session.section, cut);
     });
-    assert!(!egui::Popup::is_any_open(&h.ctx));
+    assert!(!any_popup_open(&h.ctx));
     assert!(h.app.dialog.is_some());
     h.step(&json!({"key":"Escape"})).unwrap();
     assert!(h.app.dialog.is_none());
@@ -2646,6 +2690,7 @@ fn summary_component_uses_supplied_newest_and_aggregate_attention_at_three_and_f
                         setting: format!("{i} mm"),
                         has_key: false,
                         editable: false,
+                        clear_key: None,
                     })
                     .collect();
                 for width in [320.0, 1600.0] {
@@ -2733,19 +2778,19 @@ fn summary_native_menu_escape_is_close_only_then_newest_replacement_clears_and_u
     assert!(crate::scenario::rect_of(&format!("viewport_status:{}:summary", item.id)).is_some());
     h.step(&json!({"click":{"handle":"viewport_status:summary"}})).unwrap();
     h.frames(3);
-    assert!(egui::Popup::is_any_open(&h.ctx));
+    assert!(any_popup_open(&h.ctx));
     assert!(crate::scenario::rect_of("menu:viewport_status_clear_all").is_some());
     let mut previous = f32::NEG_INFINITY;
     for effect in h.app.session.status_items() {
         let item = crate::viewport_status::presentation(&h.app, &effect).unwrap();
-        let close = crate::scenario::rect_of(&format!("viewport_status:{}:close", item.id)).unwrap();
-        assert!(close.top() > previous, "menu order follows oldest slots rather than newest activation");
-        previous = close.top();
+        let row = crate::scenario::rect_of(&format!("viewport_status:{}:item", item.id)).unwrap();
+        assert!(row.top() > previous, "menu order follows oldest slots rather than newest activation");
+        previous = row.top();
     }
     analysis_escape_relayout_frame(&mut h, |app| {
         assert_eq!(app.session.status_items().len(), 3, "footer Esc hint is not a clear-all binding");
     });
-    assert!(!egui::Popup::is_any_open(&h.ctx));
+    assert!(!any_popup_open(&h.ctx));
     assert_eq!(h.app.session.status_items().len(), 3);
     h.step(&json!({"key":"Escape"})).unwrap();
     h.frames(3);
@@ -2769,7 +2814,7 @@ fn summary_menu_yields_to_preferences_and_command_dialog_without_resuming_or_ste
         let frames = (h.ctx.global_style().animation_time * 60.0).ceil() as usize + 2;
         h.step(&json!({"click":{"handle":"viewport_status:summary"}})).unwrap();
         h.frames(frames);
-        assert!(egui::Popup::is_any_open(&h.ctx));
+        assert!(any_popup_open(&h.ctx));
         assert!(crate::scenario::rect_of("menu:viewport_status_clear_all").is_some());
         let effects = h.app.session.status_items();
         let eligible = [StatusId::SurfaceAnalysis, StatusId::Continuity, StatusId::Section];
@@ -2783,7 +2828,7 @@ fn summary_menu_yields_to_preferences_and_command_dialog_without_resuming_or_ste
             h.call("ui.prefs", json!({"open":"Interface"}));
         }
         h.frames(frames);
-        assert!(!egui::Popup::is_any_open(&h.ctx), "{owner} dismisses the lower Summary popup");
+        assert!(!any_popup_open(&h.ctx), "{owner} dismisses the lower Summary popup");
         assert!(crate::scenario::rect_of("menu:viewport_status_clear_all").is_none());
         let heading = solidcraft_ui_text::tr("ui.viewport_status_summary_heading").to_uppercase();
         assert!(!h.shapes.iter().any(|shape| contains_text(&shape.shape, &heading)), "no Summary list paints over {owner}");
@@ -2800,7 +2845,7 @@ fn summary_menu_yields_to_preferences_and_command_dialog_without_resuming_or_ste
         assert_eq!(h.app.session.status_items(), effects);
         assert_eq!(h.app.session.newest_status_item(&eligible), newest);
         assert_eq!(serde_json::to_value(&*h.app.session.doc).unwrap(), document);
-        assert!(!egui::Popup::is_any_open(&h.ctx), "a dismissed Summary must not reopen after the owner closes");
+        assert!(!any_popup_open(&h.ctx), "a dismissed Summary must not reopen after the owner closes");
         if owner == "stacked" {
             h.step(&json!({"key":"Escape"})).unwrap();
             assert!(h.app.dialog.is_none());
@@ -2808,7 +2853,7 @@ fn summary_menu_yields_to_preferences_and_command_dialog_without_resuming_or_ste
         }
         h.step(&json!({"click":{"handle":"viewport_status:summary"}})).unwrap();
         h.frames(frames);
-        assert!(egui::Popup::is_any_open(&h.ctx), "a distinct native click can reopen Summary");
+        assert!(any_popup_open(&h.ctx), "a distinct native click can reopen Summary");
         assert_eq!(h.app.session.status_items(), effects);
     }
 }
@@ -2824,9 +2869,10 @@ fn summary_menu_keeps_tool_owned_row_clear_available() {
     assert_eq!(h.app.session.status_items().len(), 3);
     h.step(&json!({"click":{"handle":"viewport_status:summary"}})).unwrap();
     h.frames(frames);
-    assert!(egui::Popup::is_any_open(&h.ctx), "a Tool is not a higher modal owner");
+    assert!(any_popup_open(&h.ctx), "a Tool is not a higher modal owner");
     let section = h.app.session.status_items().into_iter().find(|item| item.id == solidcraft_engine::status_items::StatusId::Section).unwrap();
     let section = crate::viewport_status::presentation(&h.app, &section).unwrap();
+    assert!(crate::scenario::rect_of(&format!("viewport_status:{}:close", section.id)).is_some(), "Summary exposes per-status Clear directly");
     h.step(&json!({"click":{"handle":format!("viewport_status:{}:close", section.id)}})).unwrap();
     assert!(h.app.session.section.is_empty());
     assert!(h.app.tool.is_some(), "row X retains the active Tool");
@@ -2839,7 +2885,7 @@ fn summary_popup_closes_on_preference_count_and_replacement_transitions() {
         let mut h = summary_three_effects();
         h.step(&json!({"click":{"handle":"viewport_status:summary"}})).unwrap();
         h.frames(3);
-        assert!(egui::Popup::is_any_open(&h.ctx));
+        assert!(any_popup_open(&h.ctx));
         match transition {
             "disable" => h.app.preferences.viewport_status_summary = false,
             "count" => {
@@ -2851,7 +2897,7 @@ fn summary_popup_closes_on_preference_count_and_replacement_transitions() {
             _ => crate::viewport_status::dispatch(&mut h.app, vec![crate::ui_kit::StatusAction::ClearAll]),
         }
         crate::viewport_status::reconcile(&mut h.app, &h.ctx);
-        assert!(!egui::Popup::is_any_open(&h.ctx), "{transition} closes only the stale summary owner");
+        assert!(!any_popup_open(&h.ctx), "{transition} closes only the stale summary owner");
         assert!(!h.app.viewport_status.owns_focus(&h.ctx));
         h.frames(3);
         if transition == "zero" {
@@ -2914,7 +2960,7 @@ fn summary_footer_pointer_and_native_keyboard_dispatch_clear_all_without_a_key_b
         }
         h.frames(3);
         assert!(h.app.session.status_items().is_empty());
-        assert!(!egui::Popup::is_any_open(&h.ctx));
+        assert!(!any_popup_open(&h.ctx));
         assert!(crate::scenario::rect_of("viewport_status:summary").is_none());
     }
 }
@@ -2979,6 +3025,7 @@ fn status_item_actions_are_round_and_their_card_is_opaque() {
             setting: "Z · 1°".into(),
             has_key: true,
             editable: false,
+            clear_key: None,
         };
         let mut state = StatusPresentation::default();
         let mut draw = |input: egui::RawInput| {
@@ -3067,4 +3114,88 @@ fn a_long_note_wraps_inside_its_box() {
     assert!(painted.galley.rows.len() > 1, "the painted text wraps");
     let drawn = Rect::from_min_size(painted.pos, painted.galley.size());
     assert!(note.text_rect.expand(0.5).contains_rect(drawn), "painted text {drawn:?} inside box {:?}", note.text_rect);
+}
+
+/// #8120: while isolating, with no Isolate slot on the navigation bar, a status pill names the
+/// Isolation and how much it hid; its close exits the isolation, and Escape never does.
+#[test]
+fn the_isolation_pill_shows_off_the_bar_and_its_close_exits_isolation() {
+    let mut h = Harness::new();
+    h.app.run("solid.box", json!({"length": 5, "width": 5, "height": 5})).unwrap();
+    h.app.run("solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": [20, 0, 0]})).unwrap();
+    let kept = h.app.session.model.state().bodies[0].name.clone();
+    h.app.run("browser.visibility", json!({"items": [kept], "visible": true, "isolate": true})).unwrap();
+    h.settle();
+    let isolate = |h: &Harness| h.app.session.status_items().into_iter().find(|e| e.id == solidcraft_engine::status_items::StatusId::Isolate);
+    let effect = isolate(&h).expect("an Isolate status");
+    let item = crate::viewport_status::presentation(&h.app, &effect).expect("a pill, the bar having no Isolate slot");
+    assert_eq!((item.name.as_str(), item.setting.as_str()), ("Isolation", "1 hidden"));
+    assert_eq!(item.clear_key.as_deref(), Some(crate::ui_kit::chord_label("Ctrl+Shift+I").as_str()), "its close names its own key, not Escape");
+    let close = format!("viewport_status:{}:close", item.id);
+    assert!(solidcraft_ui_registry::handle_at(&close).is_some(), "drawn with its close");
+    h.app.preferences.escape_closes_analyses = true;
+    h.step(&json!({"key": "Escape"})).unwrap();
+    assert!(h.app.session.visibility.before_isolate.is_some(), "Escape never exits isolation");
+    h.app.preferences.navigation_bar.slots.push("isolate".into());
+    assert!(crate::viewport_status::presentation(&h.app, &effect).is_none(), "the bar's Isolate slot shows it instead");
+    h.app.ui.show_navigation_bar = false;
+    assert!(crate::viewport_status::presentation(&h.app, &effect).is_some(), "the bar hidden: the pill shows it");
+    h.app.ui.show_navigation_bar = true;
+    h.app.preferences.navigation_bar.slots.pop();
+    h.settle();
+    h.step(&json!({"click": {"handle": close}})).unwrap();
+    assert!(h.app.session.visibility.before_isolate.is_none() && h.app.session.visibility.hidden_bodies.is_empty(), "isolation exited");
+    assert!(isolate(&h).is_none());
+}
+
+/// #8120: with the view showing what an Isolate hid see-through or as edges, the bodies Isolate
+/// hid are drawn and can be picked (never ones the user hid before it, which stay hidden); the
+/// pill's details choose how.
+#[test]
+fn what_an_isolate_hid_shows_see_through_or_as_edges_and_can_be_picked() {
+    use solidcraft_engine::schema::view_navigation::IsolateShow;
+    let mut h = Harness::new();
+    for (corner, name) in [([0, 0, 0], "A"), ([20, 0, 0], "B"), ([40, 0, 0], "C")] {
+        h.app.run("solid.box", json!({"length": 5, "width": 5, "height": 5, "corner": corner, "body_name": name})).unwrap();
+    }
+    h.app.run("browser.visibility", json!({"items": ["C"], "visible": false})).unwrap();
+    h.app.run("browser.visibility", json!({"items": ["A"], "visible": true, "isolate": true})).unwrap();
+    h.settle();
+    assert_eq!(h.app.preferences.isolate_others, IsolateShow::Hidden, "hidden by default");
+    assert!(crate::viewport::isolate_ghost(&h.app, "B").is_none());
+    // The pill's details offer the choice, at Hidden.
+    let effect = h.app.session.status_items().into_iter().find(|e| e.id == solidcraft_engine::status_items::StatusId::Isolate).unwrap();
+    let details = crate::viewport_details::description(&h.app, &effect);
+    let choice = details.settings.iter().find(|s| s.id == "show").expect("a choice of how the rest shows");
+    assert!(!details.settings.iter().any(|s| s.id == "pick"), "no click choice while the parts are hidden");
+    assert!(matches!(&choice.value, crate::ui_kit::DetailValue::Choice { selected: 0, options } if options.len() == 3));
+    let owner = crate::viewport_status::identity(&effect);
+    for (selected, show) in [(1, IsolateShow::Transparent), (2, IsolateShow::Wireframe)] {
+        let value = crate::ui_kit::DetailValue::Choice { selected, options: Vec::new() };
+        crate::viewport_details::dispatch(&mut h.app, &h.ctx, &owner, crate::ui_kit::DetailEvent::Change("show".into(), value));
+        h.settle();
+        assert_eq!(h.app.preferences.isolate_others, show);
+        assert_eq!(crate::viewport::isolate_ghost(&h.app, "B"), Some(show), "what the Isolate hid");
+        assert!(crate::viewport::isolate_ghost(&h.app, "C").is_none(), "hidden before the Isolate: stays hidden");
+        assert!(crate::viewport::isolate_ghost(&h.app, "A").is_none(), "shown: drawn as it is");
+        assert!(!h.app.session.body_visible("B"), "still hidden in the design");
+        assert!(crate::viewport::body_shown(&h.app, "B"), "drawn, so it can be picked");
+        assert_eq!(
+            crate::viewport::wire_ghost(&h.app, h.app.session.model.state().body("B").unwrap()),
+            show == IsolateShow::Wireframe,
+            "only edges: its faces don't pick"
+        );
+        let card = crate::viewport_details::description(&h.app, &effect);
+        assert!(card.settings.iter().any(|s| s.id == "pick"), "the click choice shows while the parts are drawn");
+        h.app.run("view.isolate_others", json!({"pick": false})).unwrap();
+        assert!(!crate::viewport::body_shown(&h.app, "B"), "clicks go through");
+        h.app.run("view.isolate_others", json!({"pick": true})).unwrap();
+        assert!(!crate::viewport::body_shown(&h.app, "C"), "hidden before the Isolate: never picked");
+    }
+    h.app.run("view.isolate_others", json!({"show": "hidden"})).unwrap();
+    assert_eq!(h.app.preferences.isolate_others, IsolateShow::Hidden);
+    assert!(crate::viewport::isolate_ghost(&h.app, "B").is_none());
+    h.app.run("browser.unisolate", json!({})).unwrap();
+    h.app.run("view.isolate_others", json!({"show": "transparent"})).unwrap();
+    assert!(crate::viewport::isolate_ghost(&h.app, "B").is_none(), "nothing isolated: nothing ghosted");
 }

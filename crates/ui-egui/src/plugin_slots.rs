@@ -22,12 +22,12 @@ use solidcraft_engine::plugin::UiSlot;
 pub(crate) struct Item {
     pub command: String,
     pub plugin: String,
-    pub entry: String,
+    pub button_label: String,
     pub label: String,
     pub slot: Slot,
     /// An importer chooses its own file, so it needs no open design.
     pub importer: bool,
-    /// The command's icon: its own from the package, else the generic plugin icon.
+    /// The entry's icon: its own from the package, else the generic plugin icon.
     pub icon: String,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,14 +123,14 @@ fn declared(plugin: &plugins::Plugin) -> Vec<Item> {
     let mut items = Vec::new();
     for entry in &plugin.entries {
         for slot in &entry.slots {
-            let slot = match slot {
-                UiSlot::Menu { name } => {
+            let (slot, slot_label) = match slot {
+                UiSlot::Menu { name, label } => {
                     let Some(name) = menu_name(name) else { continue };
-                    Slot::Menu(name)
+                    (Slot::Menu(name), label.as_deref())
                 }
-                UiSlot::Ribbon { name } => {
+                UiSlot::Ribbon { name, label, .. } => {
                     let Some(name) = ribbon_name(name) else { continue };
-                    Slot::Ribbon(name)
+                    (Slot::Ribbon(name), label.as_deref())
                 }
             };
             let command = format!("{}.{}", plugin.id, entry.name);
@@ -140,11 +140,17 @@ fn declared(plugin: &plugins::Plugin) -> Vec<Item> {
             if items.iter().any(|item: &Item| item.command == command && item.slot == slot) {
                 continue;
             }
+            let button_label = slot_label
+                .filter(|l| !l.trim().is_empty())
+                .map(str::trim)
+                .or_else(|| (!entry.label.trim().is_empty()).then(|| entry.label.trim()))
+                .unwrap_or(entry.name.as_str())
+                .to_owned();
             items.push(Item {
                 command,
                 plugin: plugin.name.clone(),
-                entry: entry.name.clone(),
-                label: format!("{} · {}", plugin.name, entry.name),
+                button_label: button_label.clone(),
+                label: format!("{} · {}", plugin.name, button_label),
                 slot,
                 importer: entry.kind == solidcraft_engine::plugin::EntryKind::Importer,
                 icon: crate::plugin_menu::command_icon(plugin, entry).to_owned(),
@@ -172,6 +178,7 @@ fn discovered(app: &mut SolveApp, inventory: Inventory) {
         }
         app.plugin_slots.items = inventory.plugins.iter().flat_map(declared).take(8192).collect();
     }
+    crate::plugin_workspaces::discovered(app, &inventory.plugins);
     let root = inventory.root.clone();
     // The Plugins menu and the Model tab's ribbon list what this scan found, once, here: no frame
     // reads the plugin folders itself (#21594).
@@ -386,22 +393,6 @@ pub(crate) fn begin(app: &mut SolveApp, command: &str) {
     }
 }
 
-pub(crate) fn menu_rows(app: &mut SolveApp, ui: &mut egui::Ui, name: &'static str) -> bool {
-    let entries = items(app, Slot::Menu(name));
-    if entries.is_empty() {
-        return false;
-    }
-    ui.separator();
-    for item in entries {
-        let row = ui_kit::Item::action(&item.command, &item.label, &item.icon);
-        if ui_kit::menu::list_row(ui, &row).is_some() {
-            begin(app, &item.command);
-            return true;
-        }
-    }
-    false
-}
-
 pub(crate) struct RibbonGroup {
     key: String,
     name: String,
@@ -439,10 +430,10 @@ impl RibbonGroup {
                 .map(|entry| ribbon::Button {
                     id: &entry.command,
                     run: &entry.command,
-                    label: &entry.entry,
+                    label: &entry.button_label,
                     name: &entry.label,
-                    icon: "prefs_plugins",
-                    size: ribbon::ButtonSize { width: ribbon::button_width(ui.painter(), &entry.entry), min_width: ribbon::BUTTON_MIN_WIDTH },
+                    icon: &entry.icon,
+                    size: ribbon::ButtonSize { width: ribbon::button_width(ui.painter(), &entry.button_label), min_width: ribbon::BUTTON_MIN_WIDTH },
                     planned: false,
                     enabled: true,
                     pressed: false,
@@ -458,19 +449,7 @@ impl RibbonGroup {
             enabled: true,
             open: self.open,
             running: None,
-            more: self
-                .entries
-                .iter()
-                .map(|e| ribbon::MoreRow {
-                    id: &e.command,
-                    label: &e.label,
-                    icon: "prefs_plugins",
-                    shortcut: "",
-                    enabled: true,
-                    checked: None,
-                    hint: None,
-                })
-                .collect(),
+            more: self.entries.iter().map(|entry| ui_kit::Item::action(&entry.command, &entry.label, &entry.icon)).collect(),
         }
     }
     pub(crate) fn toggle(&self, ctx: &egui::Context, toggle: bool) {
@@ -488,47 +467,35 @@ impl RibbonGroup {
         if ctx.data(|d| d.get_temp::<egui::Id>(egui::Id::unique("sc_panel_open"))) != Some(self.popup) {
             return None;
         }
-        let mut chosen = None;
-        let out = ui_kit::Container::new(ctx, ui_kit::Surface::Popup)
-            .area(self.popup)
-            .fixed_pos(drawn.label.left_bottom())
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                ui_kit::Menu::show_frame(ui, ui_kit::Menu::frame(), |ui| {
-                    ui_kit::Menu::heading(ui, &self.name);
-                    for item in &self.entries {
-                        if ui_kit::menu::list_row(ui, &ui_kit::Item::action(&item.command, &item.label, &item.icon)).is_some() {
-                            chosen = Some(item.command.clone());
-                        }
-                    }
-                });
-            });
-        if let Some(command) = chosen {
-            begin(app, &command);
-            ctx.data_mut(|d| d.remove::<egui::Id>(egui::Id::unique("sc_panel_open")));
-        } else if ctx.input(|i| i.key_pressed(egui::Key::Escape))
-            || (ctx.input(|i| i.pointer.any_pressed()) && !out.response.contains_pointer() && !drawn.label_response.contains_pointer())
-        {
-            ctx.data_mut(|d| d.remove::<egui::Id>(egui::Id::unique("sc_panel_open")));
+        let mut items = vec![ui_kit::Item::heading(&self.name)];
+        items.extend(self.entries.iter().map(|entry| ui_kit::Item::action(&entry.command, &entry.label, &entry.icon)));
+        let output = ui_kit::Menu::popup(ctx, self.popup, ui_kit::MenuAnchor::Rect(drawn.label), &items, drawn.label_response.clicked());
+        if let Some(item) = output.picked {
+            begin(app, &item.id);
         }
-        Some((self.popup, out.response.rect))
+        if output.close {
+            ctx.data_mut(|data| data.remove::<egui::Id>(egui::Id::unique("sc_panel_open")));
+        }
+        output.rect.map(|rect| (self.popup, rect))
     }
 }
 
 /// The finish group remains last; the app still addresses its original built-in group indices.
-pub(crate) fn restore_group_indices(out: &mut crate::ribbon::Out, builtin: usize, plugins: usize, exit: bool) {
+pub(crate) fn original_group_index(group: usize, builtin: usize, plugins: usize, exit: bool) -> usize {
     if !exit || builtin == 0 || plugins == 0 {
-        return;
+        return group;
     }
-    let original = |group: usize| {
-        if group == builtin + plugins - 1 {
-            builtin - 1
-        } else if group >= builtin - 1 {
-            group + 1
-        } else {
-            group
-        }
-    };
+    if group == builtin.saturating_add(plugins).saturating_sub(1) {
+        builtin - 1
+    } else if group >= builtin - 1 {
+        group.saturating_add(1)
+    } else {
+        group
+    }
+}
+
+pub(crate) fn restore_group_indices(out: &mut crate::ribbon::Out, builtin: usize, plugins: usize, exit: bool) {
+    let original = |group| original_group_index(group, builtin, plugins, exit);
     for button in &mut out.buttons {
         button.group = original(button.group);
     }
@@ -568,7 +535,9 @@ mod tests {
             approval: String::new(),
             disabled: false,
             groups: Default::default(),
+            ribbon_groups: Vec::new(),
             images: Default::default(),
+            declarations: Default::default(),
             swatches: Default::default(),
             updates: None,
             themes: Vec::new(),

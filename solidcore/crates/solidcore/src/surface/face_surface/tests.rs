@@ -1,6 +1,8 @@
 use super::*;
 use crate::eval::{Curve, Frame};
 use crate::geom::vector2d::Point2;
+use crate::math::det;
+use crate::surface::from_parameters::plane_axes_square;
 use core::f64::consts::PI;
 
 fn k() -> Kernel {
@@ -48,7 +50,7 @@ fn on_cylinder(k: &Kernel, f: &FaceSurface, r: f64) {
         (0.5 * (lo.x + hi.x), 0.5 * (lo.y + hi.y)),
     ] {
         let p = f.surface.evaluate_point(k, Point2::new(u, v)).unwrap();
-        assert!((p.x.hypot(p.y) - r).abs() <= 1e-14 * 16.0, "{p:?}");
+        assert!((det::hypot(p.x, p.y) - r).abs() <= 1e-14 * 16.0, "{p:?}");
     }
 }
 
@@ -358,7 +360,7 @@ fn a_plane_a_little_off_square_goes_back_square() {
     use crate::geom::vector3d::Vec3;
     use crate::surface::plane::Plane;
     let k = k();
-    let (s, c) = 15f64.to_radians().sin_cos();
+    let (s, c) = det::sin_cos(15f64.to_radians());
     let dom = Extent2d::from_bounds(-3.0, -1.0, 4.0, 2.0);
     let plane = Plane::new(
         Vec3::new(10010.0, 9997.58, 10.0),
@@ -401,7 +403,7 @@ fn a_plane_a_little_off_square_goes_back_square() {
         );
     }
     // a plane already square keeps its axes to the bit
-    let (sn, cs) = 15f64.to_radians().sin_cos();
+    let (sn, cs) = det::sin_cos(15f64.to_radians());
     let square = Plane::new(
         Vec3::new(10010.0, 9997.58, 10.0),
         Vec3::new(cs, sn, 0.0),
@@ -466,6 +468,86 @@ fn degenerate_cone_and_torus_faces_go_round_with_their_label() {
     }
 }
 
+/// A torus label stands on a form that shows a short arc of its tube: the floor of a tooth
+/// space a round cutter leaves, with the form the revolve that makes it leaves (one rational
+/// quadratic arc of the tube, a degree or less of a tube of radius 13.725 about a circle of
+/// radius 38.725, swept a quarter turn). The face is that torus, with the label's own
+/// numbers, both ways. So short an arc does not fix the tube's circle, so the kernel found no
+/// torus in the form, the label had no parametrisation to stand on, and the face became its
+/// exact NURBS. (The form the kernel itself makes for a label, `form::surface`, lies on the
+/// frame's quarter grid and shows a quarter of the tube at least.)
+#[test]
+fn a_torus_label_stands_on_a_short_arc_of_its_tube() {
+    let k = k();
+    // a frame off the origin and tilted off every axis
+    let axis = Vec3::new(1.0, 2.0, 3.0);
+    let axis = axis * (1.0 / axis.length());
+    let ex = Vec3::new(3.0, -1.0, 0.0);
+    let ex = ex - axis * ex.dot(axis);
+    let ex = ex * (1.0 / ex.length());
+    let ey = axis.cross(ex);
+    let origin = Vec3::new(12.5, -7.25, 40.0);
+    let (major, minor) = (38.725, 13.725);
+    let label = Record::Torus {
+        frame: Frame {
+            origin: [origin.x, origin.y, origin.z],
+            x_axis: [ex.x, ex.y, ex.z],
+            y_axis: [ey.x, ey.y, ey.z],
+        },
+        major_radius: major,
+        minor_radius: minor,
+        tube_start: 0.0,
+    };
+    let quarter = PI / 4.0;
+    for arc_deg in [1.2_f64, 0.3, 0.1, 0.05] {
+        // the tube's arc about its inner equator, the sweep from the frame's x to its y
+        let half = (0.5 * arc_deg).to_radians();
+        let homogeneous: Vec<Vec<[f64; 4]>> = (0..3)
+            .map(|i| {
+                let u = f64::from(i) * quarter;
+                let wu = if i == 1 { det::cos(quarter) } else { 1.0 };
+                let radial = (ex * det::cos(u) + ey * det::sin(u)) * (1.0 / wu);
+                (0..3)
+                    .map(|j| {
+                        let v = PI + (f64::from(j) - 1.0) * half;
+                        let wv = if j == 1 { det::cos(half) } else { 1.0 };
+                        let p = origin
+                            + radial * (major + minor * det::cos(v) / wv)
+                            + axis * (minor * det::sin(v) / wv);
+                        let w = wu * wv;
+                        [p.x * w, p.y * w, p.z * w, w]
+                    })
+                    .collect()
+            })
+            .collect();
+        let knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+        let net = Record::RationalSpline {
+            u_knots: knots.clone(),
+            v_knots: knots,
+            homogeneous,
+        };
+        let d = [[0.0, 1.0], [0.0, 1.0]];
+        let f = face_surface(&k, &label, Some(&net), d, &[]).unwrap();
+        assert!(
+            matches!(f.surface.kind(), SurfaceKind::Torus(_)),
+            "{arc_deg} degrees: {:?}",
+            f.surface.kind()
+        );
+        let r = record_face(&k, &f.surface, &f.uv_domain).unwrap();
+        assert_eq!(
+            (&r.surface, r.nurbs.as_ref()),
+            (&label, Some(&net)),
+            "{arc_deg} degrees"
+        );
+        let back = face_surface(&k, &r.surface, r.nurbs.as_ref(), r.domain, &[]).unwrap();
+        assert_eq!(
+            record_face(&k, &back.surface, &back.uv_domain).unwrap(),
+            r,
+            "{arc_deg} degrees"
+        );
+    }
+}
+
 /// The kernel's own check of a face surface, at every level: the failed reports as
 /// `(reporting type, test number, message)`.
 fn check_failures(k: &Kernel, s: &Surface) -> Vec<(i64, u64, String)> {
@@ -519,7 +601,7 @@ fn a_label_with_its_origin_elsewhere_on_the_axis_passes_the_kernels_check() {
                 },
                 Record::Cone {
                     frame: at(h),
-                    radius_at_origin: 5.0 + h * 0.25_f64.tan(),
+                    radius_at_origin: 5.0 + h * det::tan(0.25_f64),
                     half_angle: 0.25,
                 },
             ),

@@ -25,11 +25,13 @@
 //! (tangency-labs/smlib 54148db, e8f23e0, in `taper_walls`):
 //! [`OffsetCornerType::CurveExtension`] and linear-extension corners of a profile of
 //! lines and arcs (WR-521) build their walls exactly and may refuse a corner; the
-//! refusal is a return value, not out-params.
+//! refusal is a return value, not out-params. A profile that is one circle drafted
+//! inward past its centre is its cone to the apex, with no far cap (#22149; upstream
+//! offsets the circle past its centre and builds no closed solid).
 
 use super::taper_walls::{
-    curvature_keeping_walls, has_corner, lines_and_arcs, CornerRefusal, TaperCornerRefusal,
-    WallsInput,
+    circle_closing_at_apex, curvature_keeping_walls, has_corner, lines_and_arcs, CornerRefusal,
+    TaperCornerRefusal, WallsInput,
 };
 use super::{as_bspline, PrimitiveCreationAccess};
 use crate::curve::composite_curve::{
@@ -47,6 +49,7 @@ use crate::geom::extent1d::Extent1d;
 use crate::geom::geom_utility::p2::ContinuityType;
 use crate::geom::tol::ANG_TOL_DEG;
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::{Point3, Vec3, PI};
 use crate::nurbs::b_spline_curve::p1::BSplineCurve;
 use crate::nurbs::b_spline_surface::p1::BSplineSurface;
@@ -360,7 +363,7 @@ fn taper(
     };
 
     // This is the offset distance in the plane of the input curves
-    let mut offset = height * (draft_angle_deg.abs() * PI / 180.0).tan();
+    let mut offset = height * det::tan(draft_angle_deg.abs() * PI / 180.0);
     if offset < 0.0 {
         offset = -offset;
     }
@@ -443,7 +446,29 @@ fn taper(
             "the draft height must be finite and its size over the B-rep's tolerance",
         ));
     }
-    if keep_curvature || tangent_planes {
+    // a circle drafted inward past its centre (#22149): its cone to the apex, where nothing
+    // of the profile is left to offset or to cap
+    let closes = circle_closing_at_apex(
+        a,
+        brep,
+        scratch,
+        &WallsInput {
+            tangent: false,
+            composite: &composite,
+            inputs: &input,
+            normal: *normal,
+            height,
+            offset,
+            side: direction,
+            tol: brep_tol,
+        },
+    )?;
+    if closes {
+        empty_offsets = true;
+        a.stitch_faces(scratch, brep_tol)?;
+        let faces = a.faces(scratch)?;
+        a.copy_faces_into(scratch, &faces, brep)?;
+    } else if keep_curvature || tangent_planes {
         let walls = curvature_keeping_walls(
             a,
             brep,

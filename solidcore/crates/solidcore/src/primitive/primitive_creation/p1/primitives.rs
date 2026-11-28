@@ -66,6 +66,7 @@ use crate::error::{ignore_status, ignored, Failure, Result, SolidError};
 use crate::geom::axis2_placement::Axis2Placement;
 use crate::geom::extent2d::Extent2d;
 use crate::kernel::Kernel;
+use crate::math::det;
 use crate::math::Vec3;
 use crate::math::{EFF_ZERO, EFF_ZERO_DEG};
 use crate::nurbs::b_spline_curve::p1::{BSplineCurve, NurbCircleParam};
@@ -742,12 +743,12 @@ impl PrimitiveCreation {
         brep.set_editing_enabled(true);
         let radians = core::f64::consts::PI / 180.0;
         let start_vec =
-            frame.x_axis() * (start * radians).cos() + frame.y_axis() * (start * radians).sin();
+            frame.x_axis() * det::cos(start * radians) + frame.y_axis() * det::sin(start * radians);
         let mid = (start + end) / 2.0;
         let mid_vec =
-            frame.x_axis() * (mid * radians).cos() + frame.y_axis() * (mid * radians).sin();
+            frame.x_axis() * det::cos(mid * radians) + frame.y_axis() * det::sin(mid * radians);
         let end_vec =
-            frame.x_axis() * (end * radians).cos() + frame.y_axis() * (end * radians).sin();
+            frame.x_axis() * det::cos(end * radians) + frame.y_axis() * det::sin(end * radians);
         let delta = frame.z_axis() * length;
         let inner_points = [
             frame.origin() + start_vec * inner,
@@ -1452,6 +1453,10 @@ impl PrimitiveCreation {
                 distance = -distance;
             }
             let mut analytic_domain = Extent2d::from_bounds(0.0, 0.0, 1.0, distance);
+            // A single full-circle sweep into an empty B-rep makes the same convex right cylinder
+            // as `create_cylinder`, so `stitch_solid` can orient its shell without a closing ray.
+            let was_empty = cap_ends && curves.len() == 1 && is_empty(brep);
+            let mut single_cylinder: Option<FaceId> = None;
             for curve in &curves {
                 let interval = match curve.kind() {
                     crate::curve::curve::CurveKind::Line(c) => c.step_interval(),
@@ -1505,7 +1510,12 @@ impl PrimitiveCreation {
                                 &Extent2d::from_bounds(0.0, 0.0, 360.0, distance),
                             )?;
                             let domain = cylinder.rev.base().natural_uv_domain();
-                            cone_face(k, brep, &cylinder, domain)?;
+                            let alone = was_empty
+                                && one_solid_as_built(brep, &frame, &[radius, radius, distance]);
+                            let side = cone_face(k, brep, &cylinder, domain)?;
+                            if alone {
+                                single_cylinder = Some(side);
+                            }
                             continue;
                         }
                     }
@@ -1551,7 +1561,14 @@ impl PrimitiveCreation {
                     end_curves.push(copy);
                 }
                 planar_faces(k, brep, self.region(), &end_curves, brep.tolerance())?;
-                stitch(k, brep)?;
+                let outside = if brep.face_list().len() == 3 {
+                    single_cylinder.and_then(|side| {
+                        side_away_from(k, brep, (side, [0.25, 0.5]), (side, [0.75, 0.5]))
+                    })
+                } else {
+                    None
+                };
+                stitch_solid(k, brep, outside)?;
             } else {
                 // the profile's two copies stay open: the walls are a sheet
                 stitch_open(k, brep)?;
@@ -1582,7 +1599,7 @@ impl PrimitiveCreation {
         use crate::topology::face::p2::FaceCurves;
         let op = "primitive::primitive_creation::p1::create_sphere_no_pole";
         // fork c8f6a31 (WR-662): DropCurve, MakeFaceWithCurves and Transform are SER.
-        let start = -((0.8_f64 / 0.6).atan() * (180.0 / core::f64::consts::PI));
+        let start = -(det::atan(0.8_f64 / 0.6) * (180.0 / core::f64::consts::PI));
         let mut arc = circ_arc(
             &Arc {
                 center: Vec3::ZERO,
@@ -2036,7 +2053,7 @@ mod tests {
         let frame = Axis2Placement::new(
             Vec3::ZERO,
             Vec3::X,
-            Vec3::new(0.0, angle.cos(), angle.sin()),
+            Vec3::new(0.0, det::cos(angle), det::sin(angle)),
         );
         let mut b = Brep::new();
         let mut face = Face::new(ShellId::from_index(0));

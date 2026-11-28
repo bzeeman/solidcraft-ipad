@@ -155,18 +155,6 @@ pub struct SplitEdgeOutput {
     pub vertex: Option<VertexId>,
 }
 
-impl SplitEdgeOutput {
-    /// The upstream status; dependency errors use the enclosing `Result`.
-    #[must_use]
-    pub const fn status(self) -> i32 {
-        if self.split {
-            0
-        } else {
-            SM_ERR
-        }
-    }
-}
-
 /// `FindInfiniteRegion`, including its optional shell and bounding box arguments.
 ///
 /// The first call, `GetRegions`, requires the B-rep's native owning-list order.
@@ -1019,9 +1007,9 @@ fn split_uv_trim(k: &Kernel, b: &mut Brep, input: SplitUvInput) -> Result<()> {
 ///
 /// The editing state is the B-rep's `m_bEditingEnabled` ([`Brep::editing_enabled`]):
 /// false from the constructor, set by editing scopes. Ordinary no-split results are
-/// successful Rust returns whose
-/// [`SplitEdgeOutput::status`] is `SM_ERR`; this preserves outputs that C++ callers
-/// consume despite that status. Dependency/invalid-graph errors remain `Err`.
+/// successful Rust returns whose [`SplitEdgeOutput::split`] is false (upstream's
+/// `SM_ERR`); this preserves outputs that C++ callers consume despite that status.
+/// Dependency/invalid-graph errors remain `Err`.
 ///
 /// # Errors
 /// Invalid graph; evaluator errors; face notifications or the
@@ -1814,9 +1802,6 @@ pub fn make_edge_in_face_with_vu_with_curve_identity(
             .unwrap_or(end);
         }
         edge::insert_manifold_edge_end(b, edge_id, Some(end), false)?;
-        // (test-only seam of the goldens' WR-450 replay, feature `wr57-replay`)
-        #[cfg(feature = "wr57-replay")]
-        let mut drop_trims = false;
         let mut off_domain = None;
         let (new_face, new_fu1, new_fu2) = if new_loop_without_new_face {
             let fu1 = required(fp2::upward_faceuse(b, face)?, "face without upward use")?;
@@ -1842,22 +1827,6 @@ pub fn make_edge_in_face_with_vu_with_curve_identity(
             if std::mem::discriminant(old_surface.kind()) != std::mem::discriminant(surface.kind())
             {
                 off_domain = Some(old_surface.natural_uv_domain_with_nurb(k)?);
-            }
-            // (test-only seam of the goldens' WR-450 replay, feature `wr57-replay`: main
-            // before the retirement dropped the new face's trims where the copy is of
-            // another kind)
-            #[cfg(feature = "wr57-replay")]
-            {
-                drop_trims = crate::surface::surface::replay::choose(
-                    k,
-                    old_surface,
-                    crate::surface::surface::replay::Seam::SplitTrims,
-                    &[u64::from(
-                        std::mem::discriminant(old_surface.kind())
-                            != std::mem::discriminant(surface.kind()),
-                    )],
-                    false,
-                )?;
             }
             let new_face_owner = (env.key_of)(EntityRef::Face(new_face));
             surface.set_owner(Some(new_face_owner));
@@ -1971,17 +1940,9 @@ pub fn make_edge_in_face_with_vu_with_curve_identity(
             if let Some(domain) = &off_domain {
                 drop_trims_off_domain(k, b, new_face, domain)?;
             }
-            #[cfg(feature = "wr57-replay")]
-            if drop_trims {
-                replay_drop_face_trims(b, new_face)?;
-            }
             redistribute_inner_loops(k, b, face, new_face, start_loop, new_loop, env)?;
             if let Some(domain) = &off_domain {
                 drop_trims_off_domain(k, b, new_face, domain)?;
-            }
-            #[cfg(feature = "wr57-replay")]
-            if drop_trims {
-                replay_drop_face_trims(b, new_face)?;
             }
         } else {
             // Both boundary cycles belong to this face. Put one seam side first;
@@ -2114,6 +2075,13 @@ fn farthest_end_gap(k: &Kernel, b: &Brep, v: VertexId) -> Result<f64> {
         let Some(curve) = record.curve.as_ref() else {
             continue;
         };
+        // A tangent field evaluates to a direction, not a position on the edge.
+        if matches!(
+            curve.kind(),
+            crate::curve::curve::CurveKind::TangentField(_)
+        ) {
+            continue;
+        }
         let interval = edge::interval(b, e)?;
         for (at_v, t) in [(start, interval.min()), (end, interval.max())] {
             if at_v == Some(v) {
@@ -2230,31 +2198,6 @@ fn drop_trims_off_domain(
                     None,
                 )?;
             }
-        }
-    }
-    Ok(())
-}
-
-/// Test only (feature `wr57-replay`, the goldens' WR-450 replay): main's WR-361 restaging
-/// before the retirement, which dropped the UV trim curves of every edge use of `face`'s
-/// loops (the lazy caches of their edges' curves on the face, rebuilt when next asked
-/// for).
-#[cfg(feature = "wr57-replay")]
-fn replay_drop_face_trims(b: &mut Brep, face: FaceId) -> Result<()> {
-    let Some(fu) = crate::topology::face::p2::upward_faceuse(b, face)? else {
-        return Ok(());
-    };
-    let mate = b.faceuse(fu)?.mate;
-    for fu in std::iter::once(fu).chain(mate) {
-        for eu in crate::topology::edgeuse::p1::faceuse_edgeuses(b, fu, false, None)? {
-            crate::topology::edgeuse::p1::set_uv_trim_curve(
-                b,
-                eu,
-                crate::topology::edgeuse::p1::UvTrimCurveArg::Null,
-                0.0,
-                true,
-                None,
-            )?;
         }
     }
     Ok(())
@@ -3252,6 +3195,7 @@ fn drop_curve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::det;
 
     /// The face-orientation repair's final status 1 (upstream `TRUE`) comes back as
     /// [`OrientSheetNote::Reoriented`] on the success path, and a caller that stops on it
@@ -3887,7 +3831,6 @@ mod tests {
                     )
                     .unwrap();
                     assert!(!output.split);
-                    assert_eq!(output.status(), SM_ERR);
                     assert_eq!(k.context.doing_boolean(), previous);
                 }
                 b.set_editing_enabled(false);
@@ -4109,8 +4052,8 @@ mod tests {
             })
             .unwrap();
             assert_eq!(
-                (result.status(), result.edges, result.vertex),
-                (SM_ERR, None, vertex)
+                (result.split, result.edges, result.vertex),
+                (false, None, vertex)
             );
             b.set_editing_enabled(false);
             let disabled = make_vertex_split_edge(&mut k, &mut b, e, p, &mut env, &|_, kind| {
@@ -4120,7 +4063,7 @@ mod tests {
                 }
             })
             .unwrap();
-            assert_eq!(disabled.status(), SM_ERR);
+            assert!(!disabled.split);
             assert_eq!((disabled.edges, disabled.vertex), (None, None));
         }
         assert!(!k.context.doing_boolean());
@@ -4135,8 +4078,8 @@ mod tests {
             })
             .unwrap();
             assert_eq!(
-                (outside.status(), outside.edges, outside.vertex),
-                (SM_ERR, None, None)
+                (outside.split, outside.edges, outside.vertex),
+                (false, None, None)
             );
             assert!(k.context.doing_boolean());
         }
@@ -4156,7 +4099,7 @@ mod tests {
         // With parts 1 and 2 wired, a wire split completes, its final B-rep ADD
         // notification included.
         let out = result.unwrap();
-        assert_eq!(out.status(), 0);
+        assert!(out.split);
         let edges = out.edges.unwrap();
         assert!(edges.contains(&e));
         assert!(out.vertex.is_some());
@@ -4329,7 +4272,7 @@ mod tests {
         for i in 0..360 {
             let a = f64::from(i).to_radians();
             for (r, z) in [(rs.0, 0.0), (0.5 * (rs.0 + rs.1), 0.5 * h), (rs.1, h)] {
-                let p = Point3::new(r * a.cos(), r * a.sin(), z);
+                let p = Point3::new(r * det::cos(a), r * det::sin(a), z);
                 assert!(bx.contains_point(p, 0.0), "{p:?} outside {bx:?}");
             }
         }

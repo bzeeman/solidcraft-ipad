@@ -11,8 +11,8 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use solidcore_record::{Vec2, Vec3};
 use solidcraft_doc::drawing::dimension::{
-    Candidate, Dimension, DimensionKind, ModelEdge, ModelFace, ModelPoint, Reference, Resolved, SetKind, Silhouette, Status, TextPlace,
-    check_chain_length, check_set_targets,
+    Candidate, DEFAULT_DECIMALS, Dimension, DimensionKind, ModelEdge, ModelFace, ModelPoint, Reference, Resolved, SetKind, Silhouette, Status,
+    TextPlace, check_chain_length, check_set_targets,
 };
 use solidcraft_doc::drawing::line_maths::LineCoords;
 use solidcraft_doc::drawing::measure::{LinearDirection, Reading};
@@ -30,7 +30,7 @@ use crate::drawing_scene::{NO_PLACE, moved};
 use crate::params::bad;
 use crate::schema::drawing_dimension::{
     AddParams, ArrowResult, CandidateResult, CornerParam, DimensionLayoutResult, DimensionResult, DimensionSet, EdgeParam, EditParams, EditResult,
-    FaceParam, InspectParams, KindParam, MemberResult, PickParam, RepairParams, SilhouetteParam, SlotParam,
+    FaceParam, InspectParams, KindParam, MemberResult, OverallAxis, PickParam, RepairParams, SilhouetteParam, SlotParam,
 };
 use crate::schema::{TypedContract, output_schema_for};
 use crate::{EngineError, Result, Session};
@@ -51,8 +51,6 @@ const DEFAULT_OFFSET_MM: f64 = 10.0;
 const LOOK_PAST_MM: f64 = 0.5;
 /// How near the middle of a view's model box, in model mm, a line's middle is on it.
 const ON_CENTRE_MM: f64 = 1e-6;
-/// How many decimals a new dimension shows unless told.
-const DEFAULT_DECIMALS: u8 = 2;
 
 pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new(ADD, "Add Drawing Dimension", crate::checked!("drawing.dimension.add", add)).begins_edit()
@@ -70,7 +68,9 @@ pub static COMMANDS: &[CommandSpec] = &[
              on the arc of its outline in the view that is on them}}, {cone: {face: a face of a cone whose two silhouettes in the view \
              are on it, read as its included angle, foreshortened unless the view's plane holds its axis}}, {silhouettes: {a, b: {face, side: near or far, the silhouette nearer the other cylinder or farther}, \
              direction?: as a linear one's, aligned being square to them}: two of one cylinder make its cylinder dimension}, \
-             {faces: {a, b: flat, parallel faces the view sees edge-on, direction?: as a linear one's, aligned being square to them}} or \
+             {faces: {a, b: flat, parallel faces the view sees edge-on, direction?: as a linear one's, aligned being square to them}}, \
+             {overall: {body: a body's name, path?, direction?: horizontal (its width, default) or vertical (its height): its size in the view with rounded corners included, \
+             between the two flat faces that bound it, saved as a faces dimension; a body with a bulge past them is refused}} or \
              {chain: {points: [3 to 64 corners, in order along one line], direction?: as a linear one's, aligned being first to \
              last}} or {baseline: {origin: a corner, targets: [2 to 64 corners, in any order], direction?: as a linear one's, aligned \
              being from the origin to the last target, the others running toward the target farthest from it}: a dimension from the origin to each target, stacked 7 mm apart on paper, the \
@@ -143,6 +143,11 @@ fn added(s: &mut Session, request: AddParams) -> Result<Value> {
     let mut record = Drawing::clone(s.drawing(ADD)?);
     let view = request.view.0;
     record.view(view).ok_or_else(|| bad(ADD, format!("the drawing has no view {}", ids::encode(view))))?;
+    // Read on the session its view draws from, as the dimension is, so before the picks borrow `s`.
+    let overall = match &request.kind {
+        KindParam::Overall { body, path, direction } => Some(overall_kind(s, &record, view, body, path, *direction == Some(OverallAxis::Vertical))?),
+        _ => None,
+    };
     let (doc, model) = (&s.doc, &s.model);
     let edge = |e: &EdgeParam| doc.edge_reference(model, &e.pick, &e.path).map_err(|why| bad(ADD, why.to_string()));
     let corner = |c: &CornerParam| doc.corner_reference(model, &c.pick, &c.path).map_err(|why| bad(ADD, why.to_string()));
@@ -174,6 +179,7 @@ fn added(s: &mut Session, request: AddParams) -> Result<Value> {
         KindParam::Faces { a, b, direction } => {
             DimensionKind::Faces { a: face(&a)?, b: face(&b)?, direction: direction.unwrap_or(LinearDirection::Aligned) }
         }
+        KindParam::Overall { .. } => overall.ok_or_else(|| bad(ADD, "no overall size was worked out"))?,
         KindParam::Chain { points, direction } => {
             // Counted before any point is looked up.
             check_chain_length(points.len()).map_err(|why| bad(ADD, why.to_string()))?;
@@ -225,6 +231,15 @@ fn added(s: &mut Session, request: AddParams) -> Result<Value> {
     answer(s, ADD, id)
 }
 
+/// The kind of an overall width or height of `body` on view `view` of `record`: its two bounding flat
+/// faces ([`solidcraft_doc::Document::overall_kind`]), found on the session the view draws from.
+fn overall_kind(s: &mut Session, record: &Drawing, view: u64, body: &str, path: &[u64], vertical: bool) -> Result<DimensionKind> {
+    let basis = record.resolve_view(view).map_err(|why| bad(ADD, why.to_string()))?.basis;
+    let mut sessions = crate::drawing_view::ViewSessions::new(s);
+    let from = sessions.of_view(record, view);
+    from.doc.overall_kind(&from.model, body, path, &basis, vertical).map_err(|why| bad(ADD, why.to_string()))
+}
+
 /// A new dimension before it is placed: its view, what it measures, and what the request gave of
 /// the rest.
 pub(crate) struct NewDimension {
@@ -267,7 +282,7 @@ pub(crate) fn placed(
     cmd: &str,
     new: NewDimension,
 ) -> Result<std::result::Result<(Dimension, Option<Resolved>), Refused>> {
-    if let Err(e) = check_drawn(record, new.view, new.kind.paths(), cmd) {
+    if let Err(e) = check_drawn(s, record, new.view, new.kind.references(), cmd) {
         return Ok(Err(Refused::NotDrawn(e)));
     }
     let id = record.allocate_id(&mut s.ids).map_err(|e| bad(cmd, e.to_string()))?;
@@ -481,7 +496,7 @@ fn edit(s: &mut Session, p: &Value) -> Result<Value> {
         change(&mut staged, id, set, targets.clone(), None)?;
         if targets.is_some() {
             let dimension = staged.dimension(id).ok_or_else(|| no_dimension(EDIT, id))?;
-            check_drawn(&staged, dimension.view, dimension.kind.paths(), EDIT)?;
+            check_drawn(s, &staged, dimension.view, dimension.kind.references(), EDIT)?;
             let read = crate::drawing_view::ViewSessions::new(s)
                 .read_on(&staged, &[(id, dimension.view)], solidcraft_doc::Document::resolve_dimensions)
                 .map_err(|e| bad(EDIT, e.to_string()))?;
@@ -554,7 +569,11 @@ fn diameter_by_default(points: &[Vec3]) -> bool {
 /// view's model box; on that middle (a centre line, a symmetric pair) the fixed rule is +1, above
 /// or to the left ([`LineCoords::forward`]).
 fn side_by_default(s: &Session, drawing: &Drawing, view: u64, direction: LinearDirection, points: &[Vec3]) -> f64 {
-    let (Ok(resolved), Ok(shown)) = (drawing.resolve_view(view), crate::drawing_view::shown(s)) else { return 1.0 };
+    let copy = (!s.pending_moves.is_empty()).then(|| crate::drawing_scene::designed(s));
+    let s = copy.as_ref().unwrap_or(s);
+    let Ok(resolved) = crate::drawing_view::drawn_view(s, drawing, view) else { return 1.0 };
+    let all = crate::drawing_view::shown_by(&mut crate::drawing_view::ViewSessions::new(s), &resolved);
+    let Ok((shown, extents)) = crate::drawing_view::measured(&all, &resolved) else { return 1.0 };
     let basis = resolved.basis;
     let (Some(first), Some(last)) = (points.first(), points.last()) else { return 1.0 };
     let (a, b) = (basis.to_local(*first), basis.to_local(*last));
@@ -571,7 +590,7 @@ fn side_by_default(s: &Session, drawing: &Drawing, view: u64, direction: LinearD
         (true, false) => -1.0,
         (false, true) => 1.0,
         _ => {
-            let from_centre = crate::drawing_view::measure(&shown, &basis).map_or(0.0, |e| (middle - e.model.center()).dot(n));
+            let from_centre = (middle - extents.model.center()).dot(n);
             if from_centre < -ON_CENTRE_MM { -1.0 } else { 1.0 }
         }
     }
@@ -746,6 +765,8 @@ fn answer(s: &mut Session, cmd: &str, id: u64) -> Result<Value> {
     };
     // Before `status_words` takes the status: the layout reads the whole reading.
     let (layout, layout_why) = layout_on_sheet(s, &d, dimension, &r);
+    let mut warnings = drawn_warning(s, &d, dimension.view, dimension.kind.references());
+    warnings.extend(short_edge_warning(s, &d, dimension, &r));
     let (status, why, candidates) = status_words(r.status);
     let angle = dimension.kind.is_angle();
     let shown = |value: f64| if angle { value.to_degrees() } else { value };
@@ -765,12 +786,44 @@ fn answer(s: &mut Session, cmd: &str, id: u64) -> Result<Value> {
         candidates,
         layout,
         layout_why,
-        warnings: drawn_warning(&d, dimension.view, dimension.kind.paths()),
+        warnings,
         dry_run: false,
         param_warnings: Vec::new(),
     };
     serde_json::to_value(reply).map_err(|e| EngineError::Other(e.to_string()))
 }
+
+/// A message when a length dimension reads less than its body reaches the same way: its edge stops
+/// where a rounded or chamfered corner begins, so it isn't the part's width or height. The body's
+/// reach is read from its exact box ([`solidcraft_doc::Document::body_extent_along`]).
+fn short_edge_warning(s: &mut Session, d: &Drawing, dimension: &Dimension, r: &Resolved) -> Option<String> {
+    let DimensionKind::Length { edge, direction, .. } = &dimension.kind else { return None };
+    let value = r.measured?.value;
+    let basis = d.resolve_view(dimension.view).ok()?.basis;
+    let axis = match direction {
+        LinearDirection::Horizontal => basis.x,
+        LinearDirection::Vertical => basis.y,
+        LinearDirection::Along(v) => (basis.x * v.x + basis.y * v.y).normalized()?,
+        LinearDirection::Aligned => {
+            let [a, b] = [*r.points.first()?, *r.points.get(1)?];
+            let run = b - a;
+            (basis.x * run.dot(basis.x) + basis.y * run.dot(basis.y)).normalized()?
+        }
+    };
+    let mut sessions = crate::drawing_view::ViewSessions::new(s);
+    let from = sessions.of_view(d, dimension.view);
+    let reach = from.doc.body_extent_along(&from.model, &edge.body, &edge.path, axis)?;
+    (reach > value + EDGE_SHORT_MM).then(|| {
+        format!(
+            "this edge reads {value:.2} mm but body `{}` reaches {reach:.2} mm the same way: the edge stops where a corner is rounded or chamfered. \
+             For the part's overall size add `kind: {{overall: {{body: \"{}\", direction: horizontal or vertical}}}}`",
+            edge.body, edge.body
+        )
+    })
+}
+
+/// How much longer than a length dimension's edge its body must reach for [`short_edge_warning`].
+const EDGE_SHORT_MM: f64 = 1e-3;
 
 /// Why a dimension has no layout, and its text isn't dragged, while the search for a font to fall back
 /// to runs: the search is never waited for here, as add and its dry run run on the window thread.

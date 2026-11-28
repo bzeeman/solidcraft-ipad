@@ -13,9 +13,9 @@ design · **3** Save · **4** Export: meshes, STEP, a DXF of the view, URDF, JSO
 |---|---|---|
 | `.sc` (versioned container or JSON design; `.solidcraft` files from earlier releases still open) | yes | yes |
 | `.json` (self-contained plain JSON design) | yes | yes |
-| STEP (AP203, AP214, AP242) | solids, assemblies, units, names, colours | AP242 with names, colours and the component tree |
+| STEP (AP203, AP214, AP242) | solids, assemblies, units, names, colours, layers (as body folders) | AP242 with names, colours, the component tree and body folders (as layers) |
 | IGES 5.3 | manifold solids, or trimmed surfaces sewn into solids | manifold solids with names and colours |
-| FreeCAD `.FCStd` | sketches and features (Pad, Pocket, Revolution, Groove, Fillet, Chamfer, primitives, Mirrored, patterns), else solids, through cadmpeg | |
+| FreeCAD `.FCStd` | sketches and features (Pad, Pocket, Revolution, Groove, Fillet, Chamfer, primitives, Mirrored, patterns), else solids and sketches, through cadmpeg | |
 | Rhino `.3dm` | solids, through cadmpeg | Rhino 8, through cadmpeg: bodies with flat faces and straight edges exact, others as meshes; names and colours (desktop only) |
 | 3MF, STL, OBJ | mesh bodies | yes |
 | glTF 2.0 (`.glb`, `.gltf` with its `.bin` files) | mesh bodies in the node tree's components, materials as appearances | `.glb`: placed bodies with their colours, metallic and roughness, in metres with Y up |
@@ -85,10 +85,20 @@ body's colour and each face's own colour, but without the bodies' names, and IGE
 named and in its colour, as cadmpeg's IGES writer writes no assemblies. The reply's warnings say what
 the file leaves out.
 
+To export a [sketch](sketching.md) with real circles, arcs, and lines, right-click the sketch
+in the **Browser** and choose **Export DXF…** (`sketch.export_dxf`). These become DXF
+`CIRCLE`, `ARC`, and `LINE` entities; a rectangle is four `LINE` entities. Other curves, such as
+splines, are written as short straight `LINE` segments, and construction curves are left out.
+**File → Export Current View as DXF…** instead writes a projected drawing made of straight
+segments, so circles and arcs become segmented curves. See
+[view DXF export](https://github.com/tangency-labs/solidcraft/blob/main/docs/view-dxf.md)
+for projection and tolerance settings.
+
 Opening a STEP, IGES, FreeCAD or Rhino file creates a design with the file's bodies as a base feature, and
 inserting one adds them to the current design. Later features build on them. A FreeCAD file's
 sketches and features are rebuilt as SolidCraft features instead, so its dimensions can be edited;
-when one cannot be, its bodies come in as a base feature and a warning says why (Preferences ›
+when one cannot be, its bodies come in as a base feature with its sketches beside them, and a
+warning says why (Preferences ›
 General › FreeCAD files turns the rebuild off). Preferences › General › Import with cadmpeg (off
 by default) reads STEP, IGES, FreeCAD and Rhino files with cadmpeg straight into B-rep instead of
 through SolidCraft's own STEP and IGES readers, to compare the two. Mesh bodies render,
@@ -111,6 +121,12 @@ sub-assemblies become nested components, and a part used several times is one co
 occurrence for each place. The imported assembly is rigid: moving its component moves everything,
 and its parts don't move on their own. Right-click the component and choose **Placement → Unlock Contents** to
 joint the parts one by one. Undo removes a whole import in one step.
+
+Body folders travel through STEP as presentation layers. A STEP export puts each body in a folder
+on a layer named after the folder's path: a body in the folder Rails inside the folder Frame is
+on the layer `Frame/Rails`. A body in no folder is on no layer. When you insert or open a STEP
+file, each body on a layer goes into a folder of that name in its component's Bodies folder, and
+a `/` in the name nests the folders, so an exported design comes back with the same folders.
 
 A glTF file (`.glb`, or `.gltf` with the `.bin` files it names in the same folder) comes in the
 same way: its nodes become nested components, a mesh placed several times is one component with
@@ -213,6 +229,15 @@ Reload from disk to pick it up. If Windows won't let the file be replaced becaus
 it, the new copy gets a number (`name-2.3mf`) and the status line says so. Files older than seven days are
 deleted the next time SolidCraft starts.
 
+To keep the file with your other parts instead, tick **Keep in a folder** in the Send
+window (the desktop app only) and **Choose…** a folder. The file is then saved there, named after the
+design with the next free version (`Mount plate-v1.3mf`, `Mount plate-v2.3mf`, …), and the slicer
+opens that file. Tick **Replace file** to keep one file (`Mount plate.3mf`)
+instead. SolidCraft remembers the folder for each saved design (a design that was never saved asks again), so the next send of it starts with
+the folder already chosen; untick the box to go back to the slicer folder. Scripts pass `copy_to`
+(the folder) and, to replace the file, `copy_overwrite: true` to `file.send_to_slicer`; the reply has
+`copy: true` and the `version`.
+
 If the slicer is already running, PrusaSlicer, SuperSlicer and Cura load the file in
 the open window instead of starting another one (they are started with `--single-instance`).
 Other slicers, Bambu Studio and OrcaSlicer among them, are started as they are, so they may open a
@@ -231,6 +256,13 @@ Closed meshes can be rebuilt as solids with the `mesh.convert` command (command 
 scripts and the control channel): a mesh with a constant cross-section as analytic planar and
 cylindrical faces, any other closed mesh as the faceted solid its triangles describe.
 
+To convert a standalone STL file without adding it to the open design, use
+`file.stl_to_step` with `input` and `output` paths. It imports the STL into a temporary design,
+converts each mesh body using the same rules as `mesh.convert`, then writes a STEP solid.
+Coordinates are millimetres by default; `units` can specify `mm`, `cm`, `m`, `in` or `ft`, and
+`tolerance` defaults to `0.05 mm`. The input must be a closed mesh that can be converted; an
+import or conversion failure leaves the open design and output file unchanged.
+
 Use **Surface → Mesh → Reduce Mesh** to create a separate, simpler mesh without changing the
 original. Select the mesh body and choose either a retained percentage (greater than 0 and less
 than 100) or a positive target triangle count. The status reports the original, target and achieved
@@ -246,6 +278,17 @@ exactly one of `percentage` or `triangle_count`; an optional `name` names the hi
 The **Mesh** section also contains **Convert Mesh**, **Insert Mesh**, and **Save As Mesh**.
 To restore the previous Surface toolbar, enable **Use legacy Surface toolbar** in Layout preferences.
 Mesh panel customizations are kept but hidden while the legacy toolbar is enabled.
+
+To model against a mesh body, such as a 3D scan or the STL of an existing part, use
+**Surface → Mesh → Section Stack** (`mesh.section_stack`). Pick the mesh body and a plane, and
+give the spacing (and, if you like, the first and last distance from the plane; by default the
+whole body). Each plane that meets the mesh gets an ordinary sketch holding the lines, arcs and
+circles fitted to the section there, as **Fit Curves to Mesh Section** fits one. Tick **Extrude
+slabs** to extrude each section's outline to the next plane, each slab a body of its own, for a
+stepped stand-in for the mesh. A slab never runs past a plane that missed the mesh, and the last
+one stops where the body ends. A section whose slab cannot be built is listed in the command's
+reply with the reason, and the other slabs stand. The sketches and slabs go into one timeline
+folder, and one Undo removes them all.
 
 **File → Export 3MF…** with the format changed to **3MF with face tags** (`file.export` or `file.save_mesh` with `format: "3mf-tagged"`) writes an
 ordinary 3MF in which every triangle also names the B-rep face it lies on and every coordinate
@@ -292,10 +335,12 @@ cache with `cache: true` on warm saves; saving never rebuilds cold geometry just
 create one. Ordinary saves and browser downloads default to `cache: false`. An additional display-mesh cache remains opt-in
 with `preview: true`. Unsupported or mismatched caches are ignored. Browser opening
 still rebuilds synchronously.
-Warm saves with explicit `cache: true` can also include a small PNG thumbnail. It travels with the file, so
-Home can show the recent design without reconstructing it when no local picture
-is available. Missing or incompatible pictures use the usual thumbnail generation.
-The default `cache: false` omits the portable thumbnail too.
+A save also includes a picture of the design, from the window, the command line or a script. It
+travels with the file, so Home and the parts library can show the design without rebuilding it.
+It shows the model alone from the isometric view. SolidCraft draws a grid under it in your theme's
+3D view colours, and the model lifts off the grid while the pointer is on its card. If your system
+turns animations off, it stays still. A missing picture is drawn again, and saving with
+`cache: false` omits it.
 The repository's `docs/design-container.md` describes limits and encoding details.
 
 Designs are saved in the newest format this version of SolidCraft knows (`"format": "solidcraft/N"`
@@ -427,6 +472,16 @@ cut to 200 characters and 240 bytes, so it fits with its extension. Left empty, 
 offers the design's name, and Save As Mesh and a body's Export… offer the body's name. The control
 channel sets it with `ui.prefs {"export_name": "{design}-{body}"}`.
 
+**Preferences → Design → Send to Slicer file name** names the file that **Send to Slicer** writes,
+which is the name the slicer and the printer show. It takes the same placeholders and makes the
+name safe in the same way; `{body}` is the first body sent. With `{design}-{body}`, sending the
+body Base of the design Bracket writes `Bracket-Base.3mf`. Sending again replaces that file.
+Designs that get the same name share one file, so a later send replaces the earlier one. Left
+empty, the file is named after the design, followed by a code that keeps designs and body
+selections apart, such as `Bracket-71b989e9a18bb966.3mf`. The control channel sets it with
+`ui.prefs {"slicer_file_name": "{design}-{body}"}`. A script names the file itself, with the
+`name` of `file.send_to_slicer`; the preference does not apply to it.
+
 ## Default folders
 
 **Preferences → Design → Folders** sets where the save dialogs open. Both settings are empty by
@@ -448,7 +503,8 @@ browser, so it has no folder settings. The control channel sets them with
 
 **File → Design Properties…** (also under **Document Settings** in the Browser, and on the
 top component's right-click menu, under **Design**) records who made a design and what it is: project, part
-number, revision, author, organization, description and licence. **OK** applies the changes as
+number, revision, author, organization, description, material, finish (with a list of common
+finishes to pick from; a design that is one part carries them itself) and licence. **OK** applies the changes as
 one undo step. Scripts and agents use the same commands: `document.metadata` reads them,
 `document.metadata.set` (`key` and `value`, or `values: {key: value, …}`) and
 `document.metadata.remove` (`key` or `keys`) change them. `document.inspect` and the MCP
@@ -518,6 +574,11 @@ Drive) can be open on two computers at once. The desktop app watches for two wri
 Scripts, the CLI and the control channel never get these questions. `doc.open` opens the design
 and reports `open_elsewhere` in its result (`read_only: true` opens it read-only), and `file.save`
 over a file that changed on disk fails with an error until it is given `overwrite: true`.
+
+`solidcraft-cli run SCRIPT --save FILE` still saves when a fresh lock shows the design is open
+in another SolidCraft window. It prints a warning to standard error, even with `--quiet`.
+The other window keeps showing the design it opened. Its next save uses the changed-on-disk
+check described above.
 
 ## Designs in Git
 

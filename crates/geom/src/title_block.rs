@@ -81,6 +81,17 @@ pub enum CellKind {
     ProjectionSymbol,
 }
 
+/// Which mass unit a title block text cell shows for `component.mass`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MassUnit {
+    #[default]
+    Kg,
+    G,
+    Auto,
+    Both,
+}
+
 /// A text value: its content, its cap height, where its lines sit across the value box (left when
 /// not given) and what it should fit (nothing when not given).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -95,6 +106,16 @@ pub struct TextCell {
     /// The drawing's image file shown in place of the text: a logo (ISO 7200: a name or a logo).
     #[serde(default, with = "crate::ids::option", skip_serializing_if = "Option::is_none")]
     pub image: Option<u64>,
+    /// Which mass unit `component.mass` shows in this cell (`kg` when not given).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mass_unit: Option<MassUnit>,
+}
+
+impl TextCell {
+    /// Which mass unit `component.mass` shows in this cell.
+    pub fn mass_unit(&self) -> MassUnit {
+        self.mass_unit.unwrap_or_default()
+    }
 }
 
 /// A block placed on one sheet: what a writer draws, before the values are set.
@@ -161,7 +182,7 @@ pub fn default_block() -> TitleBlock {
     use HAlign::{Centre, Left};
     use Source::{Component, Drawing, Revision, Sheet};
     let field = |source, key: &str| Part::Field { source, key: key.into(), format: Format::default() };
-    let text = |cap_mm, align, fit, parts| CellKind::Text(TextCell { content: Content(parts), cap_mm, align, fit, image: None });
+    let text = |cap_mm, align, fit, parts| CellKind::Text(TextCell { content: Content(parts), cap_mm, align, fit, image: None, mass_unit: None });
     let most = |n| Fit { max_chars: Some(n), ..Fit::default() };
     let (whole, wrap) = (Fit::default(), Fit { wrap: true, ..Fit::default() });
     let title = Fit { max_chars: Some(25), wide_max_chars: Some(30), wrap: false };
@@ -174,7 +195,7 @@ pub fn default_block() -> TitleBlock {
         ("date_of_issue", [-62.0, 14.0, -30.0, 24.0], "Date of issue", text(3.5, Left, most(10), vec![field(Revision, "date")])),
         ("sheet", [-30.0, 14.0, 0.0, 24.0], "Sheet", text(3.5, Centre, most(9), sheet)),
         ("material", [-180.0, 24.0, -100.0, 34.0], "Material", text(3.5, Left, whole, vec![field(Component, "material")])),
-        ("finish", [-100.0, 24.0, -30.0, 34.0], "Finish", text(3.5, Left, whole, vec![field(Component, "properties.finish")])),
+        ("finish", [-100.0, 24.0, -30.0, 34.0], "Finish", text(3.5, Left, whole, vec![field(Component, "finish")])),
         ("mass", [-30.0, 24.0, 0.0, 34.0], "Mass", text(3.5, Centre, whole, vec![field(Component, "mass")])),
         ("legal_owner", [-180.0, 34.0, -100.0, 49.0], "Legal owner", text(3.5, Left, wrap, vec![field(Drawing, "organization")])),
         ("general_tolerances", [-100.0, 34.0, -30.0, 49.0], "General tolerances", text(2.5, Left, wrap, Vec::new())),
