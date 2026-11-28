@@ -306,8 +306,11 @@ mod ios {
                 match &cc.wgpu_render_state {
                     Some(rs) => {
                         let info = rs.adapter.get_info();
+                        // The window device's lost flag, for the panels and pictures drawn on it, as
+                        // the desktop and web apps keep it; egui draws 1x (`multisampling`).
+                        solidcraft_ui_egui::gpu::watch_window(rs, 1);
                         let depth = eframe::egui_wgpu::depth_format_from_bits(DEPTH_BITS, STENCIL_BITS);
-                        let supported = eframe::egui_wgpu::supported_msaa_samples(&rs.adapter, &rs.device, rs.target_format, depth);
+                        let supported = solidcraft_ui_egui::gpu::supported_msaa_samples(&rs.adapter, &rs.device, rs.target_format, depth);
                         let samples = supported.iter().copied().filter(|&n| n <= MSAA).max().unwrap_or(1);
                         let samples = app.set_wgpu_split(rs, DEPTH_BITS, STENCIL_BITS, samples);
                         app.msaa_supported = supported;
